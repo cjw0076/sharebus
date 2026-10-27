@@ -1,12 +1,12 @@
 # Security
 
-There is no published supported release yet. This preparation tree has not received a final security approval.
+Development alpha source is public. There is no supported packaged release yet, and source publication does not constitute final security approval.
 
 ShareBus stores room data locally and binds its broker to loopback. Session and operator credentials, native connection contexts, message contents, job records and selected artifacts are private data. They must not be committed, attached to public issues, or included in an installer. Loopback and separate agent credentials do not isolate files from another process running as the same OS user.
 
 ## Reporting a problem
 
-Before publishing, maintainers must enable this repository's **Security → Report a vulnerability** private reporting channel and verify it is usable. Use that private channel for suspected vulnerabilities. Do not post credentials, raw logs, private workspace paths, conversation contents or reproduction archives in a public issue. A public issue may describe a general symptom without private data.
+GitHub's private vulnerability reporting setting is enabled for this repository, as verified through the GitHub API. Use [Report a vulnerability](https://github.com/cjw0076/sharebus/security/advisories/new) for suspected vulnerabilities. Independent verification that the report form opens is still pending; no test report has been submitted. Do not post credentials, raw logs, private workspace paths, conversation contents or reproduction archives in a public issue. A public issue may describe a general symptom without private data.
 
 The local guide should offer a preview of a small, redacted diagnostic report. Nothing is sent to maintainers automatically. If a credential may have been exposed, pause new deliveries and use the affected provider's supported credential or account recovery procedure. Do not try to repair uncertain delivery by replaying the same message.
 

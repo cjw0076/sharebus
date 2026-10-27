@@ -60,10 +60,10 @@
     {
       "original_sha256": "4927ff94e2d5a02da0a6bc7df8304da82ae9392e087c6791932d9fda4d53b884",
       "path": "SECURITY.md",
-      "sha256": "4927ff94e2d5a02da0a6bc7df8304da82ae9392e087c6791932d9fda4d53b884",
-      "size": 2211,
+      "sha256": "680e8c127da4de106d5191509b0b09caa222efdf5300a68b48f2f2d2b77d20cf",
+      "size": 2383,
       "source_class": "authored",
-      "transform": "identity"
+      "transform": "alpha-evidence-status-r2"
     },
     {
       "original_sha256": "ef835ab8045d5a179b5bca49752c4b20f0229d57d561c434bbcadb80314c3b63",
