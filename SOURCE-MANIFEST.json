@@ -244,10 +244,10 @@
     {
       "original_sha256": "2e1515775d668cad4d3e52141079240cf838d12ea5a259a63cdf68832ac86510",
       "path": "outputs/sharebus/mcp_server.py",
-      "sha256": "2e1515775d668cad4d3e52141079240cf838d12ea5a259a63cdf68832ac86510",
-      "size": 24107,
+      "sha256": "7e0a05bbb4e43fab342980e0884513d78c1894fec1a9122f7fa633da23576974",
+      "size": 24124,
       "source_class": "stable-snapshot",
-      "transform": "identity"
+      "transform": "registered-peer-tool-metadata-v1"
     },
     {
       "original_sha256": "ab1e1970d1fe1a001426ef202ee2780e62121637f56d49066e6b6bca1646312c",
