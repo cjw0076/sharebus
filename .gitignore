@@ -1,0 +1,48 @@
+# Local rooms and credentials, including nested workspaces.
+**/.sharebus/
+.env
+.env.*
+!.env.example
+*.token
+*.pem
+*.key
+*.sqlite
+*.sqlite3
+*.db
+*.db-wal
+*.db-shm
+**/private/
+**/credentials/
+
+# Developer environments and build outputs.
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+build/
+dist/
+.wheelhouse/
+.coverage
+htmlcov/
+
+# Private receipts, staging reports and local application state.
+evidence/
+**/evidence/
+.omc/
+PREPARATION-REPORT.md
+source-selection.json
+STATE.md
+verification/
+*.log
+*.dmp
+Thumbs.db
+.DS_Store
+
+# Original app-extracted media are never release inputs.
+**/codex-spritesheet*.webp
+**/clawd-laptop.webm
+**/clawd-poster.png
+**/antigravity-official-mark.svg
