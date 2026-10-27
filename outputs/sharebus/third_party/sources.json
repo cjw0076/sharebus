@@ -1,0 +1,31 @@
+{
+  "schema_version": 1,
+  "sources": [
+    {
+      "repository": "https://github.com/slopus/happy",
+      "commit": "b0fc933dd423ee562207d1788c65b4b9cc4960d1",
+      "path": "packages/happy-cli/scripts/session_hook_forwarder.cjs",
+      "raw_url": "https://raw.githubusercontent.com/slopus/happy/b0fc933dd423ee562207d1788c65b4b9cc4960d1/packages/happy-cli/scripts/session_hook_forwarder.cjs",
+      "preserved_path": "happy/session_hook_forwarder.cjs",
+      "sha256": "7bcf91ea96a9a2a443975d3fe0c2a3523fd35548f74df2b89e790b54f28c45f6",
+      "license": "MIT",
+      "license_raw_url": "https://raw.githubusercontent.com/slopus/happy/b0fc933dd423ee562207d1788c65b4b9cc4960d1/LICENSE",
+      "license_path": "happy/LICENSE",
+      "license_sha256": "e251d0448ef3ce023c20ebac9b90a7d8642b1434825838247d6e457668eb3e00",
+      "adaptation": "commands/sharebus/session_hook_forwarder.cjs"
+    },
+    {
+      "repository": "https://github.com/fujibee/agmsg",
+      "commit": "e3a93251628127a2ea2c7e416bd7db86bf29f3ef",
+      "path": "scripts/drivers/types/codex/watch-once.sh",
+      "raw_url": "https://raw.githubusercontent.com/fujibee/agmsg/e3a93251628127a2ea2c7e416bd7db86bf29f3ef/scripts/drivers/types/codex/watch-once.sh",
+      "preserved_path": "agmsg/watch-once.sh",
+      "sha256": "d6b7e8b140699907f0d50c387b3dc7e572a4ac4666475f0bb35c3fce7a9b234a",
+      "license": "MIT",
+      "license_raw_url": "https://raw.githubusercontent.com/fujibee/agmsg/e3a93251628127a2ea2c7e416bd7db86bf29f3ef/LICENSE",
+      "license_path": "agmsg/LICENSE",
+      "license_sha256": "61e0e4783f9f5ab48745db7a35673c66400312335499071d763d4651d9fee9b3",
+      "adaptation": "auto_watch.py lifetime deadline before bootstrap and bounded metadata polling"
+    }
+  ]
+}

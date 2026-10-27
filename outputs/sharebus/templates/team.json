@@ -1,0 +1,27 @@
+{
+  "schema_version": 1,
+  "notes": "Editable preferences, not registered identities. Display names are user examples, not verified model IDs. Fill model_id only from the current native host catalog; null retains an unresolved request.",
+  "roles": {
+    "ideation": {"label": "Ideation", "preferred_provider": "antigravity"},
+    "frontend_design": {"label": "Frontend & Design", "preferred_provider": "codex"},
+    "backend_infra": {"label": "Backend & Infra", "preferred_provider": "claude"}
+  },
+  "providers": {
+    "codex": {
+      "main": {"display_model": "gpt6.1-sol", "model_id": null, "effort": "high", "tier": "frontier"},
+      "routine": {"display_model": "gpt6.1-luna", "model_id": null, "effort": "medium", "tier": "economy"},
+      "visual": {"display_model": "gpt-astra", "model_id": null, "effort": "high", "tier": "frontier"}
+    },
+    "claude": {
+      "main": {"display_model": "Claude Opus 5.5", "model_id": null, "effort": "high", "tier": "frontier"},
+      "routine": {"display_model": "Claude Sonnet 5.5", "model_id": null, "effort": "medium", "tier": "economy"},
+      "routine_docs": {"display_model": "Claude Haiku 5.5", "model_id": null, "effort": "low", "tier": "economy"},
+      "visual": {"display_model": "Claude Opus 5.5", "model_id": null, "effort": "high", "tier": "frontier"}
+    },
+    "antigravity": {
+      "main": {"display_model": "Gemini Argon", "model_id": null, "effort": "high", "tier": "frontier"},
+      "routine": {"display_model": "Gemini Flash 3.8", "model_id": null, "effort": "medium", "tier": "economy"},
+      "visual": {"display_model": "Gemini Argon", "model_id": null, "effort": "high", "tier": "frontier"}
+    }
+  }
+}
