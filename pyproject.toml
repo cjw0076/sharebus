@@ -1,0 +1,58 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "sharebus-local"
+version = "0.1.0a1"
+description = "A local collaboration bus for supported native AI conversations"
+readme = "README.md"
+requires-python = ">=3.11"
+license = "MIT AND OFL-1.1"
+license-files = [
+  "LICENSE",
+  "outputs/sharebus/third_party/happy/LICENSE",
+  "outputs/sharebus/third_party/agmsg/LICENSE",
+  "outputs/sharebus/web/assets/Pretendard-LICENSE.txt",
+]
+dependencies = ["mcp==1.30.0", "pydantic>=2,<3"]
+
+[project.optional-dependencies]
+dev = ["pytest>=8,<10", "build>=1,<2"]
+
+[project.scripts]
+sharebus = "sharebus_cli:main"
+
+[tool.setuptools]
+packages = ["sharebus_cli", "sharebus_runtime"]
+include-package-data = false
+
+[tool.setuptools.package-dir]
+sharebus_cli = "src/sharebus_cli"
+sharebus_runtime = "outputs/sharebus"
+
+[tool.setuptools.package-data]
+sharebus_runtime = [
+  "SPEC.md",
+  "web/index.html",
+  "web/assets/favicon.svg",
+  "web/assets/PretendardVariable.woff2",
+  "web/assets/Pretendard-LICENSE.txt",
+  "web/assets/characters/sharebus-*.svg",
+  "web/assets/characters/sharebus-original-artwork.json",
+  "commands/sharebus/SKILL.md",
+  "commands/sharebus/native_context.md",
+  "commands/sharebus/session_hook_forwarder.cjs",
+  "templates/SHAREBUS.md",
+  "templates/team.json",
+  "third_party/NOTICE.md",
+  "third_party/sources.json",
+  "third_party/happy/LICENSE",
+  "third_party/happy/session_hook_forwarder.cjs",
+  "third_party/agmsg/LICENSE",
+  "third_party/agmsg/watch-once.sh",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["outputs/sharebus/tests", "tests"]
+addopts = "-ra"
