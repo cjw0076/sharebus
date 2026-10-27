@@ -23,7 +23,7 @@ if TYPE_CHECKING:
 
 TOOLS = (
     "sharebus_join", "sharebus_status", "sharebus_send", "sharebus_read",
-    "sharebus_publish", "sharebus_copy", "sharebus_ask_user",
+    "sharebus_publish", "sharebus_copy", "sharebus_ask_user", "sharebus_peer",
 )
 PROVIDERS = ("claude", "codex", "antigravity", "chatgpt", "gemini", "cursor", "hermes")
 KINDS = Literal["task", "question", "answer", "critique", "proposal", "progress", "result", "message"]

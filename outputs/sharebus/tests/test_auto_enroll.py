@@ -23,11 +23,19 @@ from daemon import BusHTTPServer
 from store import BusError, BusStore
 
 
+def isolated_environment():
+    # Windows OpenSSL needs SystemRoot even for urllib's HTTP opener.
+    runtime = {}
+    if os.name == "nt" and "SYSTEMROOT" in os.environ:
+        runtime["SYSTEMROOT"] = os.environ["SYSTEMROOT"]
+    return patch.dict(os.environ, runtime, clear=True)
+
+
 class BootstrapTests(unittest.TestCase):
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory(prefix="sharebus-bootstrap-")
         self.root = Path(self.temporary.name).resolve()
-        self.environment = patch.dict(os.environ, {}, clear=True)
+        self.environment = isolated_environment()
         self.environment.start()
 
     def tearDown(self):
@@ -371,7 +379,7 @@ class AutoHTTPTests(unittest.TestCase):
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory(prefix="sharebus-auto-http-")
         self.root = Path(self.temporary.name).resolve()
-        self.environment = patch.dict(os.environ, {}, clear=True)
+        self.environment = isolated_environment()
         self.environment.start()
         self.server = BusHTTPServer(self.root, providers="none", enable_native=False, discovery=[])
         self.store = self.server.store

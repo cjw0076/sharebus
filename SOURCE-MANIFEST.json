@@ -20,10 +20,10 @@
     {
       "original_sha256": "0185948bbfab931315868acebfd85d6888a3eddd31889318ea7fd28095a14c6e",
       "path": "CONTRIBUTING.md",
-      "sha256": "0185948bbfab931315868acebfd85d6888a3eddd31889318ea7fd28095a14c6e",
-      "size": 5981,
+      "sha256": "e156124441839d5401e77423f6d4e5e778051759978a151087e75615243c7331",
+      "size": 6412,
       "source_class": "authored",
-      "transform": "identity"
+      "transform": "alpha-evidence-status-r2"
     },
     {
       "original_sha256": "2cfc0a4eeca4690c1a74e570b5cbff1ac966e026a63435d0ecefb10410750bed",
@@ -44,34 +44,34 @@
     {
       "original_sha256": "aaeaac37e3647d76eb0784127478b084581cf2eb68aee8dae4058cf458fda65f",
       "path": "README.md",
-      "sha256": "aaeaac37e3647d76eb0784127478b084581cf2eb68aee8dae4058cf458fda65f",
-      "size": 4608,
+      "sha256": "262a160d8ac0fad9aa83cc9e1a11be889e4966456731d7fe2474b61537650f8d",
+      "size": 4982,
       "source_class": "authored",
-      "transform": "identity"
+      "transform": "alpha-evidence-status-r2"
     },
     {
       "original_sha256": "d5f8d15578777bb5e1509d17b9ad3f7f8fd5463396c70f3abe191a4574df9815",
       "path": "RELEASE-CHECKLIST.md",
-      "sha256": "d5f8d15578777bb5e1509d17b9ad3f7f8fd5463396c70f3abe191a4574df9815",
-      "size": 3508,
+      "sha256": "7f31a6aa748b7f148f38d85a88019493a8dc788c89552302b924215ed8566c76",
+      "size": 4770,
       "source_class": "authored",
-      "transform": "identity"
+      "transform": "alpha-evidence-status-r2"
     },
     {
       "original_sha256": "4927ff94e2d5a02da0a6bc7df8304da82ae9392e087c6791932d9fda4d53b884",
       "path": "SECURITY.md",
-      "sha256": "4927ff94e2d5a02da0a6bc7df8304da82ae9392e087c6791932d9fda4d53b884",
-      "size": 2211,
+      "sha256": "680e8c127da4de106d5191509b0b09caa222efdf5300a68b48f2f2d2b77d20cf",
+      "size": 2383,
       "source_class": "authored",
-      "transform": "identity"
+      "transform": "alpha-evidence-status-r2"
     },
     {
       "original_sha256": "ef835ab8045d5a179b5bca49752c4b20f0229d57d561c434bbcadb80314c3b63",
       "path": "conftest.py",
-      "sha256": "ef835ab8045d5a179b5bca49752c4b20f0229d57d561c434bbcadb80314c3b63",
-      "size": 906,
+      "sha256": "eaa62b221f5c1dad5ff49c5953a61156de2901adcf863a77edb7ba71fc98c234",
+      "size": 1268,
       "source_class": "authored",
-      "transform": "identity"
+      "transform": "canonical-temporary-root-fixture-v1"
     },
     {
       "original_sha256": "a4eb80320323c6c4940c8f35aff91075bd956c0bcfd96c624a64464dac362dc5",
@@ -92,10 +92,10 @@
     {
       "original_sha256": "67c200c491c34389e5afefeca189e9dd269f1737988fb059690899a54d2c09dc",
       "path": "docs/STATUS.md",
-      "sha256": "67c200c491c34389e5afefeca189e9dd269f1737988fb059690899a54d2c09dc",
-      "size": 4522,
+      "sha256": "198aaa611303824c1f1029b951beff06a46c6b70f34f6728c51a684eeaca586c",
+      "size": 7445,
       "source_class": "authored",
-      "transform": "identity"
+      "transform": "alpha-evidence-status-r2"
     },
     {
       "original_sha256": "84cdd08ba43bd470786eab254461325bb975258857f61c37aaea6ec3fc41582c",
@@ -244,10 +244,10 @@
     {
       "original_sha256": "2e1515775d668cad4d3e52141079240cf838d12ea5a259a63cdf68832ac86510",
       "path": "outputs/sharebus/mcp_server.py",
-      "sha256": "2e1515775d668cad4d3e52141079240cf838d12ea5a259a63cdf68832ac86510",
-      "size": 24107,
+      "sha256": "7e0a05bbb4e43fab342980e0884513d78c1894fec1a9122f7fa633da23576974",
+      "size": 24124,
       "source_class": "stable-snapshot",
-      "transform": "identity"
+      "transform": "registered-peer-tool-metadata-v1"
     },
     {
       "original_sha256": "ab1e1970d1fe1a001426ef202ee2780e62121637f56d49066e6b6bca1646312c",
@@ -340,10 +340,10 @@
     {
       "original_sha256": "bac230cf19029192e41ff559545e8869704acdd9f94e357542540c867892b45b",
       "path": "outputs/sharebus/tests/test_auto_enroll.py",
-      "sha256": "f3d17301247b1a0f7ba25c699cd44ae47bc747132e9f060841b2cd09cff8dbaf",
-      "size": 41493,
+      "sha256": "68a800307267545596d2a3dfd3c77a6889844c0cbefc4ec9fe2fc32fa93f2812",
+      "size": 41745,
       "source_class": "stable-snapshot",
-      "transform": "reparse-stat-test-v1"
+      "transform": "reparse-stat-test-v1+windows-runtime-env-fixture-v1"
     },
     {
       "original_sha256": "cd8a920f91003348f5b54989a98eb537eff887c9a7556a0ae00882496cbf20db",
@@ -372,10 +372,10 @@
     {
       "original_sha256": "e9cd0cf1f97bc41ff7eeaf270c8b333cf67985e011877e5f0a46bcedf39b801a",
       "path": "outputs/sharebus/tests/test_daemon.py",
-      "sha256": "e9cd0cf1f97bc41ff7eeaf270c8b333cf67985e011877e5f0a46bcedf39b801a",
-      "size": 36625,
+      "sha256": "73097b672ee80964259799732197378b6382677d2d67a9e67bc90e5af95ef1df",
+      "size": 36793,
       "source_class": "stable-snapshot",
-      "transform": "identity"
+      "transform": "native-adapter-subscription-fixture-v1"
     },
     {
       "original_sha256": "a3ddccd0f8bc0733c66b0bf69c1b7c6ddfc7c1042c5b459e274ef2ee139ecc9d",
@@ -404,18 +404,18 @@
     {
       "original_sha256": "5e07065f1ec5aa069d626d657bf03b5f250d59208c797b5a1606e45a4d20f757",
       "path": "outputs/sharebus/tests/test_mcp.py",
-      "sha256": "5e07065f1ec5aa069d626d657bf03b5f250d59208c797b5a1606e45a4d20f757",
-      "size": 59149,
+      "sha256": "a1b47cfe8a467cbab20fbb21082de3544ec410d82ad0b13657288c4347ec3fb3",
+      "size": 59113,
       "source_class": "stable-snapshot",
-      "transform": "identity"
+      "transform": "canonical-interpreter-fixture-v1"
     },
     {
       "original_sha256": "2982e9de194a0a62a66564c0fc5268b8cda12eaa08f080a905fd81b2c8b1e4da",
       "path": "outputs/sharebus/tests/test_native_bridge.py",
-      "sha256": "2982e9de194a0a62a66564c0fc5268b8cda12eaa08f080a905fd81b2c8b1e4da",
-      "size": 18670,
+      "sha256": "ecd2779478df6995afbaa7647506fb44ce560659e0177a62c6b9a609a4718c3b",
+      "size": 18797,
       "source_class": "stable-snapshot",
-      "transform": "identity"
+      "transform": "conditional-bytecode-guard-argv-fixture-v1"
     },
     {
       "original_sha256": "2c2fd7887bb11f4a8bd654b8e4715027714b989079799e60862fd84e4349fd57",

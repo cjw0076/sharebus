@@ -8,7 +8,7 @@ The wheel keeps the flat runtime under `sharebus_runtime`, mapped from `outputs/
 
 The small `sharebus_cli` console entry launches the installed `sharebus.py` using the same interpreter and a literal argument vector. Running the file preserves its sibling import resolution and `__file__` resource paths without publishing generic top-level modules such as `store` or `adapters`. No shell is involved. The runtime's existing install helper continues to locate its sibling MCP, hooks, templates and web files.
 
-Python 3.11 is the source-language minimum because the runtime uses `tomllib`. The first CI candidate uses Python 3.13 on each OS; that does not establish coverage for every Python version. MCP is pinned to `1.30.0` because the existing runtime explicitly checks that version. Runtime dependencies are MCP and Pydantic; pytest and build are development-only dependencies. This project adds no paid model API client.
+Python 3.11 is the source-language minimum because the runtime uses `tomllib`. The published CI uses Python 3.13 on each OS; that does not establish coverage for every Python version. MCP is pinned to `1.30.0` because the existing runtime explicitly checks that version. Runtime dependencies are MCP and Pydantic; pytest and build are development-only dependencies. This project adds no paid model API client.
 
 ## Local developer commands
 
@@ -20,11 +20,11 @@ py -3.13 -m venv .venv
 .\.venv\Scripts\sharebus.exe --help
 ```
 
-On macOS/Linux use `python3.13 -m venv .venv`, then `.venv/bin/python` and `.venv/bin/sharebus` for the corresponding commands. Developer dependency installation needs access to the Python package index or an approved local wheelhouse. Running `sharebus` with no arguments or `sharebus gui` opens the GUI backend; `--help` remains a read-only CLI command. Current Windows build/install and protocol evidence, including the failed installed-wheel probe, is separated in [STATUS](docs/STATUS.md). macOS/Linux execution is not established by the workflow template.
+On macOS/Linux use `python3.13 -m venv .venv`, then `.venv/bin/python` and `.venv/bin/sharebus` for the corresponding commands. Developer dependency installation needs access to the Python package index or an approved local wheelhouse. Running `sharebus` with no arguments or `sharebus gui` opens the GUI backend; `--help` remains a read-only CLI command. Windows build/install and protocol evidence is separated in [STATUS](docs/STATUS.md): a historical R3 wheel passed fresh offline installed help/status and MCP initialization/list-eight-tools/clean exit; the earlier R2 failure remains recorded. Final integrated-source package acceptance is still pending. The first macOS/Linux CI jobs actually executed unit tests and failed; native execution and packaged GUI support remain unverified.
 
 ## Checks
 
-`templates/ci.yml` is an executable automatic push/PR workflow candidate. Place it at `.github/workflows/ci.yml` when the reviewed standalone source is collected. It uses hosted runners, read-only repository permissions, no provider credentials and no publishing step. Action versions are pinned to the official v4.2.2 checkout and v5.6.0 setup-python commits.
+The automatic push/PR workflow is already present at `.github/workflows/ci.yml`. Its first [hosted run](https://github.com/cjw0076/sharebus/actions/runs/40509040282) executed on Windows, macOS and Ubuntu: source/license/privacy steps passed, unit tests failed on all three, and later build/wheel-smoke steps were skipped. Fixes and a passing integrated rerun remain pending. The workflow uses read-only repository permissions, no provider credentials and no publishing step. Action versions are pinned to the official v4.2.2 checkout and v5.6.0 setup-python commits.
 
 Run the selected-source check before the unit suite. It validates the three accepted compact-message pins and Happy/agmsg source-license hashes, rejects private paths and extracted media, and reports obvious credential patterns by location without printing matches. It is one part of export review, not a guarantee that no secret exists.
 
