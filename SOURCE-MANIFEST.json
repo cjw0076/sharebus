@@ -68,10 +68,10 @@
     {
       "original_sha256": "ef835ab8045d5a179b5bca49752c4b20f0229d57d561c434bbcadb80314c3b63",
       "path": "conftest.py",
-      "sha256": "ef835ab8045d5a179b5bca49752c4b20f0229d57d561c434bbcadb80314c3b63",
-      "size": 906,
+      "sha256": "eaa62b221f5c1dad5ff49c5953a61156de2901adcf863a77edb7ba71fc98c234",
+      "size": 1268,
       "source_class": "authored",
-      "transform": "identity"
+      "transform": "canonical-temporary-root-fixture-v1"
     },
     {
       "original_sha256": "a4eb80320323c6c4940c8f35aff91075bd956c0bcfd96c624a64464dac362dc5",
@@ -404,10 +404,10 @@
     {
       "original_sha256": "5e07065f1ec5aa069d626d657bf03b5f250d59208c797b5a1606e45a4d20f757",
       "path": "outputs/sharebus/tests/test_mcp.py",
-      "sha256": "5e07065f1ec5aa069d626d657bf03b5f250d59208c797b5a1606e45a4d20f757",
-      "size": 59149,
+      "sha256": "a1b47cfe8a467cbab20fbb21082de3544ec410d82ad0b13657288c4347ec3fb3",
+      "size": 59113,
       "source_class": "stable-snapshot",
-      "transform": "identity"
+      "transform": "canonical-interpreter-fixture-v1"
     },
     {
       "original_sha256": "2982e9de194a0a62a66564c0fc5268b8cda12eaa08f080a905fd81b2c8b1e4da",

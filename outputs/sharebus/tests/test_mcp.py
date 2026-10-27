@@ -549,6 +549,7 @@ class MCPTests(unittest.IsolatedAsyncioTestCase):
 
 class InstallerTests(unittest.TestCase):
     def test_codex_queue_mode_removes_only_owned_waiters_and_preserves_manifest_choice(self):
+        python = Path(sys.executable).resolve()
         with tempfile.TemporaryDirectory(prefix="sharebus-queue-install-") as directory:
             root = Path(directory)
             home, workspace = root / "home", root / "workspace"
@@ -557,7 +558,7 @@ class InstallerTests(unittest.TestCase):
             codex = workspace / ".codex/hooks.json"
             global_codex = home / ".codex/hooks.json"
             claude = workspace / ".claude/settings.local.json"
-            first = prepare(home, Path(sys.executable), hooks_workspace=workspace, auto_hooks=True,
+            first = prepare(home, python, hooks_workspace=workspace, auto_hooks=True,
                             watch_timeout=1, codex_native_queue=False)
             apply(first, root / "first-backups")
 
@@ -585,7 +586,7 @@ class InstallerTests(unittest.TestCase):
             global_config["hooks"]["Stop"] = [{"hooks": [watcher, custom_stop]}]
             global_codex.write_text(json.dumps(global_config), encoding="utf-8")
             claude_before = claude.read_text(encoding="utf-8")
-            plan = prepare(home, Path(sys.executable), hooks_workspace=workspace, auto_hooks=True, codex_native_queue=True)
+            plan = prepare(home, python, hooks_workspace=workspace, auto_hooks=True, codex_native_queue=True)
             selected = json.loads(plan[codex])
             self.assertNotIn(watcher, handlers(selected, "Stop"))
             self.assertNotIn(cancel, handlers(selected, "Interrupt"))
@@ -605,23 +606,23 @@ class InstallerTests(unittest.TestCase):
             apply(plan, root / "queue-backups")
             self.assertGreater(len(list((root / "queue-backups").glob("*.bak"))), 0)
             with patch("install.subprocess.run") as run, patch("install.subprocess.Popen") as popen:
-                receipt = install_auto(workspace, home=home, python=Path(sys.executable), codex_native_queue=None)
+                receipt = install_auto(workspace, home=home, python=python, codex_native_queue=None)
                 run.assert_not_called()
                 popen.assert_not_called()
             self.assertIs(receipt["codex_native_queue"], True)
             self.assertEqual(receipt["codex_delivery"], "native_queue")
             self.assertFalse(receipt["applied"])
             self.assertEqual(receipt["native_messages_sent"], 0)
-            unchanged = prepare(home, Path(sys.executable), hooks_workspace=workspace, auto_hooks=True)
+            unchanged = prepare(home, python, hooks_workspace=workspace, auto_hooks=True)
             self.assertEqual(json.loads(unchanged[codex]), selected)
-            restored = prepare(home, Path(sys.executable), hooks_workspace=workspace, auto_hooks=True, codex_native_queue=False)
+            restored = prepare(home, python, hooks_workspace=workspace, auto_hooks=True, codex_native_queue=False)
             restored_config = json.loads(restored[codex])
             self.assertIn(watcher, handlers(restored_config, "Stop"))
             self.assertIn(cancel, handlers(restored_config, "Interrupt"))
             self.assertIn(foreign, handlers(restored_config, "Stop"))
             self.assertEqual(restored[claude], claude_before)
             apply(restored, root / "fallback-backups")
-            self.assertIs(install_auto(workspace, home=home, python=Path(sys.executable))["codex_native_queue"], False)
+            self.assertIs(install_auto(workspace, home=home, python=python)["codex_native_queue"], False)
 
     def test_queue_selection_is_typed_and_manifest_update_uses_cas(self):
         with tempfile.TemporaryDirectory(prefix="sharebus-queue-cas-") as directory:

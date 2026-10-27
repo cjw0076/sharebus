@@ -1,6 +1,20 @@
-"""Standalone import-collision fixtures; no Avalokita source is distributed."""
+"""Standalone test fixtures; no Avalokita source is distributed."""
+
+from pathlib import Path
+import tempfile
 
 import pytest
+
+
+@pytest.fixture(scope="session", autouse=True)
+def canonical_temporary_root():
+    # System temp aliases (/var on macOS, Windows 8.3 names) are not test links.
+    original = tempfile.tempdir
+    tempfile.tempdir = str(Path(tempfile.gettempdir()).resolve())
+    try:
+        yield
+    finally:
+        tempfile.tempdir = original
 
 
 @pytest.fixture(autouse=True)
