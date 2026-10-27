@@ -20,10 +20,10 @@
     {
       "original_sha256": "0185948bbfab931315868acebfd85d6888a3eddd31889318ea7fd28095a14c6e",
       "path": "CONTRIBUTING.md",
-      "sha256": "0185948bbfab931315868acebfd85d6888a3eddd31889318ea7fd28095a14c6e",
-      "size": 5981,
+      "sha256": "e156124441839d5401e77423f6d4e5e778051759978a151087e75615243c7331",
+      "size": 6412,
       "source_class": "authored",
-      "transform": "identity"
+      "transform": "alpha-evidence-status-r2"
     },
     {
       "original_sha256": "2cfc0a4eeca4690c1a74e570b5cbff1ac966e026a63435d0ecefb10410750bed",
@@ -44,18 +44,18 @@
     {
       "original_sha256": "aaeaac37e3647d76eb0784127478b084581cf2eb68aee8dae4058cf458fda65f",
       "path": "README.md",
-      "sha256": "aaeaac37e3647d76eb0784127478b084581cf2eb68aee8dae4058cf458fda65f",
-      "size": 4608,
+      "sha256": "262a160d8ac0fad9aa83cc9e1a11be889e4966456731d7fe2474b61537650f8d",
+      "size": 4982,
       "source_class": "authored",
-      "transform": "identity"
+      "transform": "alpha-evidence-status-r2"
     },
     {
       "original_sha256": "d5f8d15578777bb5e1509d17b9ad3f7f8fd5463396c70f3abe191a4574df9815",
       "path": "RELEASE-CHECKLIST.md",
-      "sha256": "d5f8d15578777bb5e1509d17b9ad3f7f8fd5463396c70f3abe191a4574df9815",
-      "size": 3508,
+      "sha256": "7f31a6aa748b7f148f38d85a88019493a8dc788c89552302b924215ed8566c76",
+      "size": 4770,
       "source_class": "authored",
-      "transform": "identity"
+      "transform": "alpha-evidence-status-r2"
     },
     {
       "original_sha256": "4927ff94e2d5a02da0a6bc7df8304da82ae9392e087c6791932d9fda4d53b884",
@@ -92,10 +92,10 @@
     {
       "original_sha256": "67c200c491c34389e5afefeca189e9dd269f1737988fb059690899a54d2c09dc",
       "path": "docs/STATUS.md",
-      "sha256": "67c200c491c34389e5afefeca189e9dd269f1737988fb059690899a54d2c09dc",
-      "size": 4522,
+      "sha256": "198aaa611303824c1f1029b951beff06a46c6b70f34f6728c51a684eeaca586c",
+      "size": 7445,
       "source_class": "authored",
-      "transform": "identity"
+      "transform": "alpha-evidence-status-r2"
     },
     {
       "original_sha256": "84cdd08ba43bd470786eab254461325bb975258857f61c37aaea6ec3fc41582c",

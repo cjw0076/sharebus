@@ -1,26 +1,53 @@
 # Support and evidence
 
-Status date: 2026-10-27. Version `0.1.0a1` is a development alpha source candidate. Packaged end-user installation and a native support guide have separate acceptance work.
+Status date: 2026-10-28. Version `0.1.0a1` is public **development alpha source**, first published at commit `c38c2a08a62adbe3f9358cd486ade21e0e56b566`. No tag, GitHub release or end-user installer has been published. The dedicated native support guide is not implemented.
 
-| Area | Evidence read during preparation | First-release boundary |
+| Area | Observed evidence | Still required |
 | --- | --- | --- |
+| Public source | Finite source manifest, preserved notices and selected source/privacy checks; exact reviewed tree published | Review and pin each subsequent change; source publication is not package acceptance |
 | Durable local bus, controls, selected artifacts | Existing source and historical source/API tests | Re-run on the selected public revision |
 | Compact native message formatting | Previously accepted scoped tests: file-wise 170 passes / 2 Windows symlink skips; independent 35 passes | Historical proof for three fixed files, not this whole release |
-| Codex existing conversation | Historical authenticated bus job/result round trip | One workflow; GUI rendering, restart and all future messages need separate proof |
-| Claude | Historical separate-session round trip; business-session receive/claim | Business-session result, preserved role/context and visible continuation incomplete |
+| Owned Windows Claude/Codex CLI round trip | Actual subscribed native task from Claude to Codex, answer back to Claude and selected final result; three initial jobs completed | Existing Desktop/business conversations, visible GUI continuation and inherited host tools |
+| Same-conversation resume | Both owned providers resumed their exact native conversation after clean broker close/restart and completed follow-up turns | Other hosts, operating systems and packaged execution |
+| Blind content retention | A separate four-turn seed/restart/recall test returned a private random value exactly for both providers, with no hint and no tool action | Do not generalize this owned CLI result to existing Desktop sessions or tool inheritance |
+| Codex existing conversation | Historical authenticated bus job/result evidence | Current existing-Desktop lifecycle, visible continuation and preserved tools |
+| Claude business conversation | Historical receive/claim evidence; the host required direct human approval | Approval, authenticated result and original role/context/GUI continuity remain incomplete; this hold was not bypassed |
 | Antigravity | Adapter source and synthetic tests | Existing-app native delivery unverified |
 | Policy preferences | Editable team settings and pure planning | Actual model/effort/tool inheritance unverified; plan is not enforcement |
-| Developer source/wheel | Finite source and R2/R3 sdist/wheel builds passed; source/archive privacy and notice checks passed | Installed R2 CLI help, GUI help and disabled status passed; its 45-second MCP probe failed, so full package acceptance is pending |
+| Developer source/wheel | R2/R3 distributions built; historical R3 wheel passed fresh offline installed CLI/GUI help, disabled status, resource assertions and MCP initialize/list-eight-tools/clean exit in 86.094 seconds | Earlier R2 MCP45s timeout remains preserved; final integrated CI-source package acceptance is still pending |
 | Copied-server MCP diagnostic | Independent existing-runtime probe initialized, listed eight tools and exited in 8.657 seconds, without tool execution or model input | This is not a fresh installed-wheel result; the failed R2 environment was deleted before its timeout boundary could be diagnosed |
-| Windows click launcher | R2 source has folder/provider selection and selected-provider additive setup; focused launcher author tests reported 49 passes; a private R3 portable ZIP was built | Fresh-profile packaged GUI and installed-MCP acceptance remain separate from source publication |
-| macOS/Linux | Automatic source/wheel CI candidate | No package, native or GUI support claim until actual run evidence |
-| Dedicated guide | Specification in this candidate | Not implemented or connected |
+| Console and launcher | Folder/provider selection source, scoped tests and partial browser interaction/render evidence | Complete UI interaction and fresh-profile packaged setup acceptance |
+| Windows portable bundle | A private R3 bundle was built; its bundled Python/MCP/Tk component created, mapped and destroyed a test window | Exact final-source package, physical user interaction, installer/uninstall and release checksums |
+| macOS/Linux | Actual first hosted source/unit CI jobs ran and failed | Passing source/wheel CI, native execution and packaged GUI each need their own evidence |
+| Dedicated guide | Integration specification only | Creation/reopen of the same subscribed native support conversation and bounded setup/repair |
 
 Historical counts above are reported from the inspected development state, not a fresh test run. A queue acceptance, MCP registration, synthetic agent, unit pass or CI matrix does not prove visible native conversation delivery.
 
-Current native alpha QA is separate from those older existing-GUI records. With the default 120-second startup cap, two newly owned Windows subscription CLIs completed a Claude→Codex task, Codex→Claude answer and selected final result. After a clean broker restart, both providers resumed their same native conversation and completed a follow-up task. The controller completed in 148.391 seconds with five managed turns across round-trip and resume, three completed initial jobs and the original root budget preserved. These checks verify exact session identity and completed turns; content recall was not independently verified because the resume prompt supplied the expected answer. The earlier 40-second-cap startup failure remains a separate failed attempt; product RPC/MCP policy was not weakened. This verifies newly owned Windows CLIs. Existing Desktop conversations, their GUI-only tools, Antigravity and other operating systems need their own evidence.
+## Native QA: two separate scenarios
+
+The round-trip scenario used two newly owned Windows subscription CLI conversations with the default 120-second startup cap. Claude sent one task to Codex; Codex returned an answer; Claude produced the selected final result. After clean close/restart, both providers resumed their exact stored native conversation and completed a follow-up turn. This run completed five actual managed turns in 148.391 seconds. Its first three jobs formed the peer round trip.
+
+That scenario's recall question supplied the expected answer. Its content-memory claim was corrected: a matching answer was insufficient evidence of memory. The original raw records and failed earlier 40-second-cap attempt remain preserved.
+
+A later **blind memory scenario** continued only the same two owned conversations. Each received a private random value, completed the seed turn and closed cleanly. After restart, each was asked to return the prior value without the value, answer or hint in the question. Both returned the exact value. All four turns completed with zero observed tool actions; 21 post-run checks passed, including exact native identity, preserved earlier records and owned-resource cleanup. The private value, native identifiers and raw transcripts are not public report material.
+
+These are development-runtime results, not installed-package or existing-Desktop acceptance. No original business CEO conversation or its approval hold was used for these scenarios. Product native RPC/MCP policy and subscription guards were retained; a queue receipt was not counted as completion.
+
+## Actual CI status
+
+The first [three-OS workflow run](https://github.com/cjw0076/sharebus/actions/runs/40509040282) executed on the initial published commit. All source/license/privacy steps passed. Unit failures prevented the later build and installed-wheel smoke steps from running.
+
+| Runner | First unit result |
+| --- | --- |
+| Ubuntu | 5 failed, 768 passed, 15 skipped, 3 deselected |
+| Windows | 27 failed, 760 passed, 1 skipped, 3 deselected |
+| macOS | 43 failed, 730 passed, 15 skipped, 3 deselected |
+
+The three deselected cases concern the separately documented foreign-product packaging functions. Fixes for stale test contracts and OS-specific fixtures are under review. This document does not claim an integrated passing rerun. Separate local focused runs and historical test groups must not be added into one full-suite pass count.
 
 Current public-only guard and collector/CLI tests passed 23 cases. A full-source attempt stopped after 164 passes and one Windows symlink skip at the baseline test's reparse-mock mismatch. Its approved one-case correction passed separately and now tests the actual `lstat` branch before store construction. Remaining file-group regression results are tracked separately. Do not add these runs into a single full-suite pass count.
+
+## Account and control limits
 
 The intended native mode uses users' existing supported subscribed apps. ShareBus does not guarantee access to provider features, combine subscriptions, bypass quotas, change an app's model or inherit tools into a newly created managed worker. Managed CLI execution is a separate explicitly selected feature.
 
