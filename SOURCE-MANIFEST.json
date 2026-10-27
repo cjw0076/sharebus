@@ -340,10 +340,10 @@
     {
       "original_sha256": "bac230cf19029192e41ff559545e8869704acdd9f94e357542540c867892b45b",
       "path": "outputs/sharebus/tests/test_auto_enroll.py",
-      "sha256": "f3d17301247b1a0f7ba25c699cd44ae47bc747132e9f060841b2cd09cff8dbaf",
-      "size": 41493,
+      "sha256": "68a800307267545596d2a3dfd3c77a6889844c0cbefc4ec9fe2fc32fa93f2812",
+      "size": 41745,
       "source_class": "stable-snapshot",
-      "transform": "reparse-stat-test-v1"
+      "transform": "reparse-stat-test-v1+windows-runtime-env-fixture-v1"
     },
     {
       "original_sha256": "cd8a920f91003348f5b54989a98eb537eff887c9a7556a0ae00882496cbf20db",
