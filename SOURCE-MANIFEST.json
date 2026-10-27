@@ -412,10 +412,10 @@
     {
       "original_sha256": "2982e9de194a0a62a66564c0fc5268b8cda12eaa08f080a905fd81b2c8b1e4da",
       "path": "outputs/sharebus/tests/test_native_bridge.py",
-      "sha256": "2982e9de194a0a62a66564c0fc5268b8cda12eaa08f080a905fd81b2c8b1e4da",
-      "size": 18670,
+      "sha256": "ecd2779478df6995afbaa7647506fb44ce560659e0177a62c6b9a609a4718c3b",
+      "size": 18797,
       "source_class": "stable-snapshot",
-      "transform": "identity"
+      "transform": "conditional-bytecode-guard-argv-fixture-v1"
     },
     {
       "original_sha256": "2c2fd7887bb11f4a8bd654b8e4715027714b989079799e60862fd84e4349fd57",

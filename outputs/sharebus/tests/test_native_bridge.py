@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 import subprocess
 import sys
@@ -204,7 +205,8 @@ def test_proxy_tools_are_exact_even_in_relay_test_mode(tmp_path, monkeypatch):
     guard = settings["hooks"]["PreToolUse"][0]["hooks"][0]
     assert guard["timeout"] == 30 and guard["onFailure"] == "block"
     assert guard["command"] == sys.executable
-    assert guard["args"] == [str(Path(native_bridge.__file__).resolve()), "--guard", str(proxy.request_path)]
+    flags = ["-B"] if os.environ.get("AVALOKITA_PACKAGED_RUNTIME") == "1" or sys.dont_write_bytecode else []
+    assert guard["args"] == [*flags, str(Path(native_bridge.__file__).resolve()), "--guard", str(proxy.request_path)]
     assert '"mcpServers":{}' in command[command.index("--mcp-config") + 1]
 
 
