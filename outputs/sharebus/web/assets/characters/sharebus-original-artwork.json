@@ -1,0 +1,44 @@
+{
+  "schema_version": 1,
+  "title": "ShareBus original character artwork",
+  "created": "2026-10-27",
+  "consumer": "web/index.html characterRegistry and character(provider, pose)",
+  "classification": "original-source-svg",
+  "official_asset_claim": false,
+  "source": "Original SVG geometry authored for ShareBus. No app-extracted pixels, provider logo paths, video frames, or sprites are used.",
+  "transparent_background": true,
+  "license": "MIT",
+  "copyright": "Copyright (c) 2026 ShareBus contributors",
+  "license_text": "Copyright (c) 2026 ShareBus contributors\n\nPermission is hereby granted, free of charge, to any person obtaining a copy of this software and associated documentation files (the \"Software\"), to deal in the Software without restriction, including without limitation the rights to use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of the Software, and to permit persons to whom the Software is furnished to do so, subject to the following conditions:\n\nThe above copyright notice and this permission notice shall be included in all copies or substantial portions of the Software.\n\nTHE SOFTWARE IS PROVIDED \"AS IS\", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.",
+  "provider_names": "Codex, Claude, Gemini, and Antigravity are native app labels. The artwork is an independent ShareBus representation and implies no provider endorsement.",
+  "assets": [
+    {
+      "file": "sharebus-codex.svg",
+      "sha256": "e4c7a4421d8f4285078187bc6a3eff45853609c62adccb7967529f2f06525669",
+      "size_bytes": 2103,
+      "viewBox": "0 0 240 180",
+      "description": "Blue terminal friend at a desk"
+    },
+    {
+      "file": "sharebus-claude.svg",
+      "sha256": "d1aa8608ef2d88b8643f14279098084ce685373207b2b75b429ac5c208a8b267",
+      "size_bytes": 2133,
+      "viewBox": "0 0 240 180",
+      "description": "Small orange crab at a desk"
+    },
+    {
+      "file": "sharebus-gemini.svg",
+      "sha256": "77a8e69bca4fc354c06155b0450234868c11fba86fd234a14c632e18b3238fa6",
+      "size_bytes": 2030,
+      "viewBox": "0 0 240 180",
+      "description": "Pale aqua star at a desk"
+    }
+  ],
+  "state_contract": {
+    "unknown_remains_unknown": true,
+    "registered_is_not_connected": true,
+    "motion_only_when_working": true,
+    "reduced_motion": "No movement; text state remains available"
+  },
+  "legacy_assets": "Historical assets and the historical manifest remain unchanged outside this consumer. They are not licensed by this manifest and must not be included in a public bundle without separate rights."
+}
