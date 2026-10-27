@@ -372,10 +372,10 @@
     {
       "original_sha256": "e9cd0cf1f97bc41ff7eeaf270c8b333cf67985e011877e5f0a46bcedf39b801a",
       "path": "outputs/sharebus/tests/test_daemon.py",
-      "sha256": "e9cd0cf1f97bc41ff7eeaf270c8b333cf67985e011877e5f0a46bcedf39b801a",
-      "size": 36625,
+      "sha256": "73097b672ee80964259799732197378b6382677d2d67a9e67bc90e5af95ef1df",
+      "size": 36793,
       "source_class": "stable-snapshot",
-      "transform": "identity"
+      "transform": "native-adapter-subscription-fixture-v1"
     },
     {
       "original_sha256": "a3ddccd0f8bc0733c66b0bf69c1b7c6ddfc7c1042c5b459e274ef2ee139ecc9d",

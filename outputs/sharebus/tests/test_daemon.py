@@ -25,7 +25,8 @@ class FakeAdapter:
     prompts = []
     instance_count = 0
 
-    def __init__(self, provider, workspace, agent_id, token_file, on_event=None):
+    def __init__(self, provider, workspace, agent_id, token_file, on_event=None, *, subscription_only=False):
+        self.subscription_only = subscription_only
         self.id = agent_id
         self.on_event = on_event
         self.session_id = None
@@ -154,6 +155,7 @@ class DaemonTests(unittest.TestCase):
                 self.fail("Synthetic native job did not complete")
         native = self.server.store.agent(agent["id"])["native_session_id"]
         self.assertEqual(FakeAdapter.instance_count, 1)
+        self.assertTrue(self.server.supervisor._adapters[agent["id"]].subscription_only)
         self.assertEqual(FakeAdapter.starts, [None])
         self.assertEqual(len(FakeAdapter.prompts), 2)
         self.server.supervisor.restart(agent["id"])
