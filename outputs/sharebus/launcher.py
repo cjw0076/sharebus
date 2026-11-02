@@ -36,6 +36,7 @@ MESSAGES = {
     "identity": "기존 연결의 신원을 확인하지 못했습니다. 고급 보기에서 확인해 주세요.",
     "configuration": "기존 설정을 보존하기 위해 연결을 멈췄습니다. 고급 보기에서 충돌 범위를 확인해 주세요.",
     "connection": "연결을 마치지 못했습니다. 잠시 후 다시 연결해 주세요.",
+    "help": "도움 대화를 열지 못했습니다. 잠시 후 도움을 다시 열어 주세요.",
 }
 
 
@@ -261,6 +262,22 @@ class WorkspaceActions:
         client.open()
         return connection_summary(state)
 
+    def open_help(self) -> str:
+        """Open the independent help conversation without touching room controls."""
+        self.selection.check()
+        # Help is optional and must not initialize a service just by importing
+        # the launcher (including the headless --help path).
+        try:
+            from support_controller import SupportClient
+            self.selection.check()
+            SupportClient(self.selection.path, home=self.home).start()
+        except LauncherError:
+            raise
+        except Exception as error:  # noqa: BLE001 - keep private service failures out of the normal UI.
+            raise LauncherError("help") from error
+        self.selection.check()
+        return "도움 대화를 열었습니다. 궁금한 내용을 편하게 물어보세요."
+
     def resume(self) -> str:
         client, running = self._client()
         self._start(client, running)
@@ -280,6 +297,7 @@ class LauncherApp:
         self.events: queue.Queue = queue.Queue()
         self.details = "아직 실행한 연결 작업이 없습니다."
         self.controls: list[Any] = []
+        self.active_action: str | None = None
         root.title("ShareBus")
         root.minsize(580, 470)
         root.protocol("WM_DELETE_WINDOW", self.close)
@@ -312,6 +330,7 @@ class LauncherApp:
         self.button(row, "작업실 화면 열기", lambda: self.act("open")).pack(side="left")
         self.button(row, "전체 일시정지 재개", lambda: self.act("resume")).pack(side="left", padx=8)
         ttk.Button(row, text="고급 보기", command=self.show_details).pack(side="right")
+        self.button(frame, "도움과 이야기하기", lambda: self.act("help")).pack(anchor="w", pady=(4, 0))
         self.status = tk.StringVar(value="폴더와 앱을 선택한 뒤 연결하기를 눌러 주세요.")
         ttk.Label(frame, textvariable=self.status, wraplength=530).pack(anchor="w", pady=(10, 0))
         self.root.after(100, self.poll)
@@ -348,22 +367,26 @@ class LauncherApp:
             "connect": "선택 앱의 연결 설정을 준비하고 작업실을 엽니다. 기존 멈춤은 유지합니다.",
             "open": "이 작업실의 화면을 엽니다. 연결이 끊겼다면 안전한 시작 절차로 다시 연결합니다.",
             "resume": "전체 일시정지만 해제합니다. 개별 앱의 멈춤·확인 필요 작업은 그대로 둡니다.",
+            "help": "이 작업실의 도움 대화를 엽니다.",
         }
         if action not in messages:
             return
         names = " · ".join(APP_NAMES[provider] for provider in selected)
-        if not self.dialogs.askokcancel("선택한 작업실 확인", f"작업실: {selection.path.name}\n{names}\n\n{messages[action]}", parent=self.root):
+        if action != "help" and not self.dialogs.askokcancel("선택한 작업실 확인", f"작업실: {selection.path.name}\n{names}\n\n{messages[action]}", parent=self.root):
             return
         self.busy = True
+        self.active_action = action
         for widget in self.controls:
             widget.state(["disabled"])
-        self.status.set("연결을 확인하고 있습니다. 처음 시작할 때는 잠시 걸릴 수 있습니다.")
+        self.status.set("도움 대화를 열고 있습니다." if action == "help" else
+                        "연결을 확인하고 있습니다. 처음 시작할 때는 잠시 걸릴 수 있습니다.")
         operations = WorkspaceActions(selection)
 
         def work():
             try:
                 result = (operations.connect(selected, auto_enroll=auto_enroll) if action == "connect" else
-                          operations.open_console() if action == "open" else operations.resume())
+                          operations.open_console() if action == "open" else
+                          operations.open_help() if action == "help" else operations.resume())
                 self.events.put((result, None, operations.scope))
             except Exception as error:  # noqa: BLE001 - native errors must reach only the sanitized UI boundary.
                 self.events.put((None, error, operations.scope))
@@ -372,6 +395,7 @@ class LauncherApp:
             threading.Thread(target=work, name="sharebus-launcher-action", daemon=True).start()
         except Exception as error:  # noqa: BLE001 - restore the GUI and keep startup errors sanitized.
             self.busy = False
+            self.active_action = None
             for widget in self.controls:
                 widget.state(["!disabled"])
             self.show_error(error, operations.scope)
@@ -383,13 +407,17 @@ class LauncherApp:
             pass
         else:
             self.busy = False
+            action, self.active_action = self.active_action, None
             for widget in self.controls:
                 widget.state(["!disabled"])
             if error is not None:
                 self.show_error(error, scope)
             else:
-                self.status.set(result + " — 앱에서 연결 승인을 마친 뒤 작업실에서 일을 말해 주세요.")
-                self.details = "작업 완료. 호스트 재시작·신뢰 확인이 필요할 수 있습니다.\n" + "\n".join(scope)
+                self.status.set(result if action == "help" else
+                                result + " — 앱에서 연결 승인을 마친 뒤 작업실에서 일을 말해 주세요.")
+                self.details = ("도움 대화를 열었습니다. 작업실의 연결 설정과 멈춤은 그대로 유지합니다."
+                                if action == "help" else
+                                "작업 완료. 호스트 재시작·신뢰 확인이 필요할 수 있습니다.\n" + "\n".join(scope))
         self.root.after(100, self.poll)
 
     def show_error(self, error: BaseException, scope: tuple[str, ...] = ()) -> None:

@@ -36,6 +36,13 @@ include outputs/sharebus/sharebus.py
 include outputs/sharebus/sidecar_registry.py
 include outputs/sharebus/store.py
 include outputs/sharebus/supervisor.py
+include outputs/sharebus/support_auth.py
+include outputs/sharebus/support_controller.py
+include outputs/sharebus/support_diagnostics.py
+include outputs/sharebus/support_mcp.py
+include outputs/sharebus/support_native.py
+include outputs/sharebus/support_spec.md
+include outputs/sharebus/support_store.py
 include outputs/sharebus/templates/SHAREBUS.md
 include outputs/sharebus/templates/team.json
 include outputs/sharebus/tests/test_adapters.py
@@ -49,6 +56,7 @@ include outputs/sharebus/tests/test_daemon.py
 include outputs/sharebus/tests/test_hook_context_output.py
 include outputs/sharebus/tests/test_install_selection.py
 include outputs/sharebus/tests/test_launcher.py
+include outputs/sharebus/tests/test_launcher_help.py
 include outputs/sharebus/tests/test_mcp.py
 include outputs/sharebus/tests/test_native_bridge.py
 include outputs/sharebus/tests/test_packaged_runtime.py
@@ -57,6 +65,12 @@ include outputs/sharebus/tests/test_policy_guard.py
 include outputs/sharebus/tests/test_service_runtime_verification.py
 include outputs/sharebus/tests/test_sidecar_registry.py
 include outputs/sharebus/tests/test_store.py
+include outputs/sharebus/tests/test_support_auth.py
+include outputs/sharebus/tests/test_support_controller.py
+include outputs/sharebus/tests/test_support_diagnostics.py
+include outputs/sharebus/tests/test_support_mcp.py
+include outputs/sharebus/tests/test_support_native.py
+include outputs/sharebus/tests/test_support_store.py
 include outputs/sharebus/third_party/NOTICE.md
 include outputs/sharebus/third_party/agmsg/LICENSE
 include outputs/sharebus/third_party/agmsg/watch-once.sh
@@ -71,6 +85,7 @@ include outputs/sharebus/web/assets/characters/sharebus-gemini.svg
 include outputs/sharebus/web/assets/characters/sharebus-original-artwork.json
 include outputs/sharebus/web/assets/favicon.svg
 include outputs/sharebus/web/index.html
+include outputs/sharebus/web/support.html
 include packaging/ShareBusBootstrap.cs
 include pyproject.toml
 include release-files.json

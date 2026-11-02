@@ -21,6 +21,8 @@ from urllib.parse import parse_qs, unquote, urlsplit
 from store import BusError, BusStore
 from supervisor import Supervisor
 from hosted_runtime import is_hosted
+from support_auth import ProtocolError, response_signature, token_key, verify_request
+from support_diagnostics import business_runtime, project_diagnostic
 
 
 class BusHTTPServer(ThreadingHTTPServer):
@@ -55,6 +57,8 @@ class BusHTTPServer(ThreadingHTTPServer):
         self.nonce = secrets.token_hex(16)
         self.cookie_name = "sharebus_" + self.store.workspace_id.replace("-", "")[:12]
         self.web = Path(__file__).parent / "web"
+        self._support_diag_lock = threading.Lock()
+        self._support_diag_nonces = {}
         super().__init__(("127.0.0.1", port), BusHandler)
         self.url = f"http://127.0.0.1:{self.server_port}"
         try:
@@ -210,6 +214,47 @@ class BusHandler(BaseHTTPRequestHandler):
             raise BusError("JSON object required")
         return body
 
+    def _support_diagnose(self) -> None:
+        """One signed read-only projection; no bearer, bus queue or control call."""
+        origin = "http://" + self.headers.get("Host", "")
+        hosts = self.headers.get_all("Host", [])
+        lengths = self.headers.get_all("Content-Length", [])
+        if (len(hosts) != 1 or hosts[0] not in {f"127.0.0.1:{self.server.server_port}", f"localhost:{self.server.server_port}"}
+                or self.headers.get_all("Origin", []) != [origin]
+                or self.headers.get_all("Content-Type", []) != ["application/json"]
+                or self.headers.get_all("X-Sharebus-Request", []) != ["1"]
+                or self.headers.get_all("Transfer-Encoding", []) or self.headers.get_all("Authorization", [])
+                or self.headers.get_all("Cookie", []) or len(lengths) != 1
+                or not lengths[0].isascii() or not lengths[0].isdigit() or not 2 <= int(lengths[0]) <= 64):
+            raise BusError("Signed support diagnostic required", 403)
+        self.connection.settimeout(5)
+        raw = self.rfile.read(int(lengths[0]))
+        try:
+            empty_object = len(raw) == int(lengths[0]) and json.loads(raw) == {}
+        except (ValueError, UnicodeError):
+            empty_object = False
+        if not empty_object:
+            raise BusError("Empty support diagnostic body required", 400)
+        runtime = business_runtime(self.server.runtime())
+        self.server.store.guard_workspace()
+        key = token_key(self.server.store.operator_token)
+        try:
+            nonce, expiry = verify_request(key, runtime, "business-diagnostic", "POST", self.path, raw, self.headers)
+        except ProtocolError:
+            raise BusError("Signed support diagnostic required", 403) from None
+        with self.server._support_diag_lock:
+            now = time.time()
+            self.server._support_diag_nonces = {value: end for value, end in self.server._support_diag_nonces.items() if end >= now}
+            if nonce in self.server._support_diag_nonces or len(self.server._support_diag_nonces) >= 2048:
+                raise BusError("Expired or repeated support diagnostic", 403)
+            self.server._support_diag_nonces[nonce] = expiry
+        self.server.store.guard_workspace()
+        projection = project_diagnostic(self.server.state())
+        self.server.store.guard_workspace()
+        payload = json.dumps(projection, ensure_ascii=False).encode("utf-8")
+        self._json(projection, extra={"X-Sharebus-Request-Nonce": nonce,
+            "X-Sharebus-Response-Signature": response_signature(key, runtime, "business-diagnostic", nonce, 200, payload)})
+
     def _static(self, path: str) -> None:
         if path in {"/", "/index.html"}:
             source = self.server.web / "index.html"
@@ -305,6 +350,9 @@ class BusHandler(BaseHTTPRequestHandler):
         try:
             self._check_host()
             self.server.store.guard_workspace()
+            if self.path == "/api/support/diagnose":
+                self._support_diagnose()
+                return
             body = self._body()
             self.server.store.guard_workspace()
             path = urlsplit(self.path).path

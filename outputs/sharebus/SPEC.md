@@ -1,6 +1,6 @@
 # ShareBus product specification
 
-Version: 0.1 alpha preparation, 2026-10-27.
+Version: persistent native guide increment, 2026-10-28 (implementation and acceptance pending).
 
 This records the user's confirmed direction from the existing conversation. It does not certify that every requested feature is implemented.
 
@@ -54,3 +54,17 @@ Publish usable install instructions, MIT and upstream notices, an honest support
 ## Acceptance checklist
 
 The tracked SB-01 through SB-09 checklist covers actual recovery, click setup, console interaction, native guide, supported repair, persistence, packaging, clean source/CI and public release. Evaluate each item from actual source and observed behavior. Publishing an alpha does not complete the full Avalokita goal or the planned guide.
+
+## Persistent guide increment
+
+The app owns a support controller, storage and input path independent of the selected business room. Opening help must work while that room is offline or paused, without starting/resuming it or modifying its queues. Its persistent native binding uses the selected workspace's canonical path and filesystem identity, immutable support purpose, selected provider, observed native identity and bundled specification hash. Concurrent opening must not create duplicate conversations. Uncertain native input must not replay or fall back to a replacement session.
+
+First support targets the actually verified Claude subscription profile. A guide instance has only the scoped diagnostic MCP tools, no file/shell or ordinary peer tools, and a controlled support cwd instead of the business cwd. Other guide providers stay unavailable until equivalent native enforcement is verified; business-provider preferences remain separate. Existing native approval handling and subscription checks are preserved.
+
+The user selects a folder and opens Help from the launcher. The support screen uses one ordinary composer and the existing bright-water/original-character visual direction. Authenticated operator requests can open a binding and submit/cancel a help request. Opening alone invokes no model. Show only real states and selected replies; never request manual tokens, paths or native IDs. A failed help route must never send to all business participants.
+
+The diagnostic MCP method takes no model-supplied target/root/credential and returns only a bounded projection of the selected room's connection/control/participant counts. Operator credentials stay in the controller. It does not return transcripts, private context files, native IDs or raw host errors. The first increment can explain and diagnose; it must state that automatic configuration/repair is pending. Human-request-bound setup/repair using existing preparation, path guards, backups and CAS remains required subsequent work before SB-05 completion.
+
+Private helper requests and responses must be authenticated without sending reusable operator or diagnostic secrets. Browser entry uses a short-lived, one-use ticket plus a separate origin-scoped session proof. A copied public health response, reused port or cookie alone cannot authorize a request. Business diagnostics use the fixed signed read-only endpoint; older brokers without it remain unverified and are not silently restarted or queried with a raw operator bearer. Registered participants, verified recorded channels and current app liveness are distinct observations.
+
+Acceptance includes useful actual subscription replies, exact-session restart and blind continuity, paused/offline target invariance, concurrent open, unknown/crash refusal, replaced-directory refusal, auth/Origin/Host checks, scoped tools, Korean IME/draft preservation and packaged resource presence. Generic profile probes or a button alone do not satisfy this feature.

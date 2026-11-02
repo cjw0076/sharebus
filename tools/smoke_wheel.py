@@ -9,6 +9,7 @@ import os
 from pathlib import Path
 import subprocess
 import tempfile
+import tomllib
 import venv
 import zipfile
 
@@ -40,10 +41,15 @@ runtime = Path(find_spec("sharebus_runtime").origin).parent
 assert callable(sharebus_runtime.Client), "Original compatibility import must remain available"
 assert version("mcp") == "1.30.0"
 metadata = distribution("sharebus-local")
-assert metadata.version == "0.1.0a1"
+assert metadata.version == sys.argv[2]
 assert any(item.startswith("mcp==1.30.0") for item in metadata.requires or [])
+assert any(item.startswith("certifi>=2026.10.19") for item in metadata.requires or [])
+assert tuple(map(int, version("certifi").split("."))) >= (2026, 10, 19)
 required = (
     "sharebus.py", "mcp_server.py", "sidecar_registry.py", "SPEC.md", "web/index.html",
+    "support_auth.py", "support_controller.py", "support_store.py", "support_native.py", "support_mcp.py",
+    "support_diagnostics.py",
+    "support_spec.md", "web/support.html",
     "commands/sharebus/SKILL.md", "commands/sharebus/native_context.md",
     "commands/sharebus/session_hook_forwarder.cjs", "templates/SHAREBUS.md",
     "templates/team.json", "third_party/NOTICE.md", "third_party/sources.json",
@@ -86,8 +92,64 @@ async def list_tools():
 names = asyncio.run(asyncio.wait_for(list_tools(), timeout=20))
 assert not (workspace / ".sharebus").exists(), "Metadata smoke created a private room"
 print(json.dumps({"distribution": metadata.metadata["Name"], "version": metadata.version,
-                  "mcp": version("mcp"), "tools": names, "model_calls": 0,
+                  "mcp": version("mcp"), "certifi": version("certifi"), "tools": names, "model_calls": 0,
                   "native_inputs": 0, "private_room_created": False}))
+'''
+
+
+GUIDE_PROBE = r'''
+import asyncio
+from importlib.util import find_spec
+import json
+import os
+from pathlib import Path
+import secrets
+import sys
+import time
+import uuid
+
+def phase(name):
+    print("GUIDE_SMOKE " + name + " " + str(round(time.monotonic(), 3)), file=sys.stderr, flush=True)
+
+phase("sdk-import-start")
+from mcp import ClientSession, StdioServerParameters
+from mcp.client.stdio import stdio_client
+phase("sdk-import-complete")
+
+runtime = Path(find_spec("sharebus_runtime").origin).parent
+workspace = Path(sys.argv[1]).resolve(strict=True)
+context = workspace.parent / "synthetic-guide-context.json"
+descriptor = os.open(context, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+with os.fdopen(descriptor, "w", encoding="utf-8") as target:
+    json.dump({"runtime":{"service":"sharebus-support-v1", "key":"a" * 64,
+                          "nonce":secrets.token_urlsafe(24), "pid":os.getpid(),
+                          "url":"http://127.0.0.1:1"}, "job_id":uuid.uuid4().hex,
+               "token":secrets.token_urlsafe(32), "deadline":time.time() + 120}, target)
+
+async def list_tools():
+    params = StdioServerParameters(command=sys.executable, args=[
+        "-I", "-B", str(runtime / "support_mcp.py"), "--context-file", str(context)],
+        env=dict(os.environ))
+    phase("stdio-enter-start")
+    async with stdio_client(params) as (read, write):
+        phase("stdio-enter-complete")
+        async with ClientSession(read, write) as session:
+            phase("initialize-send")
+            await session.initialize()
+            phase("initialize-received")
+            result = await session.list_tools()
+            phase("tools-received")
+            assert len(result.tools) == 1 and result.tools[0].name == "guide_diagnose"
+            schema = result.tools[0].inputSchema
+            assert schema.get("properties") == {} and not schema.get("required")
+            assert schema.get("additionalProperties") is False
+    phase("stdio-exit-complete")
+    return [tool.name for tool in result.tools]
+
+names = asyncio.run(asyncio.wait_for(list_tools(), timeout=20))
+assert not (workspace / ".sharebus").exists(), "Guide metadata created a private workroom"
+print(json.dumps({"guide_tools":names, "guide_tool_invocations":0, "model_calls":0,
+                  "native_inputs":0, "private_room_created":False}))
 '''
 
 
@@ -96,6 +158,7 @@ def main() -> int:
     parser.add_argument("--wheelhouse", type=Path, required=True, help="Local wheels including all runtime dependencies")
     parser.add_argument("--work-dir", type=Path, help="Fresh private diagnostic directory; preserved on failure")
     args = parser.parse_args()
+    expected_version = tomllib.loads((Path(__file__).resolve().parents[1] / "pyproject.toml").read_text(encoding="utf-8"))["project"]["version"]
     wheelhouse = args.wheelhouse.resolve(strict=True)
     wheels = sorted(wheelhouse.glob("sharebus_local-*.whl"))
     if len(wheels) != 1:
@@ -139,36 +202,54 @@ def main() -> int:
             raise RuntimeError("Installed console command did not show its help.")
         subprocess.run([str(command), "gui", "--help"], cwd=workspace, env=environment,
                        check=True, capture_output=True, text=True, encoding="utf-8", timeout=20)
+        runtime = next(virtual.glob("Lib/site-packages/sharebus_runtime"), None) if os.name == "nt" else next(
+            virtual.glob("lib/python*/site-packages/sharebus_runtime"), None)
+        if runtime is None:
+            raise RuntimeError("Installed guide runtime was not found.")
+        for name in ("support_controller.py", "support_mcp.py"):
+            help_result = subprocess.run([str(binary), "-B", str(runtime / name), "--help"],
+                cwd=workspace, env=environment, check=True, capture_output=True,
+                text=True, encoding="utf-8", timeout=20)
+            if "usage:" not in help_result.stdout.lower():
+                raise RuntimeError("Installed guide did not show its help.")
+        if (workspace / ".sharebus").exists() or (home / ".sharebus").exists():
+            raise RuntimeError("Guide help changed the isolated profile or workroom.")
         status_result = subprocess.run([str(command), "--workspace", str(workspace), "auto", "status"],
                                        cwd=workspace, env=environment, check=True, capture_output=True,
                                        text=True, encoding="utf-8", timeout=20)
         status = json.loads(status_result.stdout)
         if status.get("auto", {}).get("enabled") is not False or (workspace / ".sharebus").exists():
             raise RuntimeError("Read-only disabled-room status changed the workspace.")
-        timeout_error = None
-        try:
-            probe = subprocess.run([str(binary), "-I", "-B", "-c", PROBE, str(workspace)],
-                                   cwd=workspace, env=environment, check=False, capture_output=True,
-                                   text=True, encoding="utf-8", timeout=45)
-            probe_stdout, probe_stderr = probe.stdout, probe.stderr
-        except subprocess.TimeoutExpired as error:
-            timeout_error = error
-            probe_stdout = error.stdout or b""
-            probe_stderr = error.stderr or b""
-            if isinstance(probe_stdout, bytes):
-                probe_stdout = probe_stdout.decode("utf-8", errors="replace")
-            if isinstance(probe_stderr, bytes):
-                probe_stderr = probe_stderr.decode("utf-8", errors="replace")
-        (sandbox / "probe.stdout.txt").write_text(probe_stdout, encoding="utf-8")
-        (sandbox / "probe.stderr.txt").write_text(probe_stderr, encoding="utf-8")
-        print(probe_stderr, file=os.sys.stderr, end="", flush=True)
-        if timeout_error is not None:
-            raise RuntimeError("Installed MCP probe exceeded 45 seconds; phase output was preserved") from timeout_error
-        if probe.returncode:
-            raise RuntimeError("Installed MCP probe failed; phase output was preserved")
-        result = json.loads(probe_stdout)
+        results = []
+        for name, program in (("probe", PROBE), ("guide-probe", GUIDE_PROBE)):
+            timeout_error = None
+            try:
+                probe = subprocess.run([str(binary), "-I", "-B", "-c", program, str(workspace), expected_version],
+                                       cwd=workspace, env=environment, check=False, capture_output=True,
+                                       text=True, encoding="utf-8", timeout=45)
+                probe_stdout, probe_stderr = probe.stdout, probe.stderr
+            except subprocess.TimeoutExpired as error:
+                timeout_error = error
+                probe_stdout = error.stdout or b""
+                probe_stderr = error.stderr or b""
+                if isinstance(probe_stdout, bytes):
+                    probe_stdout = probe_stdout.decode("utf-8", errors="replace")
+                if isinstance(probe_stderr, bytes):
+                    probe_stderr = probe_stderr.decode("utf-8", errors="replace")
+            (sandbox / (name + ".stdout.txt")).write_text(probe_stdout, encoding="utf-8")
+            (sandbox / (name + ".stderr.txt")).write_text(probe_stderr, encoding="utf-8")
+            print(probe_stderr, file=os.sys.stderr, end="", flush=True)
+            if timeout_error is not None:
+                raise RuntimeError("Installed MCP probe exceeded 45 seconds; phase output was preserved") from timeout_error
+            if probe.returncode:
+                raise RuntimeError("Installed MCP probe failed; phase output was preserved")
+            results.append(json.loads(probe_stdout))
+        if (workspace / ".sharebus").exists() or (home / ".sharebus").exists():
+            raise RuntimeError("MCP metadata changed the isolated profile or workroom.")
+        result = results[0]
+        result["guide"] = results[1]
         result.update({"wheel": wheels[0].name, "cli_help": True, "disabled_status": True,
-                       "offline_install": True, "isolated_home": True})
+                       "guide_help": True, "offline_install": True, "isolated_home": True})
         print(json.dumps(result, ensure_ascii=False, sort_keys=True))
     return 0
 

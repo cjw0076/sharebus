@@ -7,6 +7,7 @@ import json
 import os
 from pathlib import Path
 import subprocess
+import tomllib
 import zipfile
 
 from collect_release import ROOT, digest, read_regular, relative
@@ -17,6 +18,7 @@ def build(source: Path, material_path: Path, expected: str, roots: dict[str, Pat
     if os.name != "nt":
         raise ValueError("Build and verify the Windows bundle on Windows")
     source_result = check_tree(source)
+    project_version = tomllib.loads(read_regular(source, "pyproject.toml").decode("utf-8"))["project"]["version"]
     data = read_regular(material_path.parent, material_path.name, limit=8 * 1024 * 1024)
     material = json.loads(data)
     if (digest(data) != expected or (material.get("approved") is not True and not private_candidate)
@@ -84,7 +86,7 @@ def build(source: Path, material_path: Path, expected: str, roots: dict[str, Pat
     (output / "RUNTIME-LICENSES.json").write_text(json.dumps(material["dependencies"], indent=2, sort_keys=True) + "\n", encoding="utf-8")
     public_files = [{"path": path.relative_to(output).as_posix(), "sha256": digest(path.read_bytes()), "size": path.stat().st_size}
                     for path in sorted(output.rglob("*")) if path.is_file()]
-    bundle_manifest = {"schema": "sharebus-windows-bundle/1", "version": "0.1.0a1", "source": source_result,
+    bundle_manifest = {"schema": "sharebus-windows-bundle/1", "version": project_version, "source": source_result,
                        "private_candidate_only": private_candidate,
                        "source_manifest_sha256": digest((source / "SOURCE-MANIFEST.json").read_bytes()),
                        "runtime_material_sha256": expected, "files": public_files}
