@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "sharebus-local"
-version = "0.1.0a1"
+version = "0.1.0a2"
 description = "A local collaboration bus for supported native AI conversations"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -15,7 +15,7 @@ license-files = [
   "outputs/sharebus/third_party/agmsg/LICENSE",
   "outputs/sharebus/web/assets/Pretendard-LICENSE.txt",
 ]
-dependencies = ["mcp==1.30.0", "pydantic>=2,<3"]
+dependencies = ["mcp==1.30.0", "pydantic>=2,<3", "certifi>=2026.10.19"]
 
 [project.optional-dependencies]
 dev = ["pytest>=8,<10", "build>=1,<2"]
@@ -34,7 +34,9 @@ sharebus_runtime = "outputs/sharebus"
 [tool.setuptools.package-data]
 sharebus_runtime = [
   "SPEC.md",
+  "support_spec.md",
   "web/index.html",
+  "web/support.html",
   "web/assets/favicon.svg",
   "web/assets/PretendardVariable.woff2",
   "web/assets/Pretendard-LICENSE.txt",
