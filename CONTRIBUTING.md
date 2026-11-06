@@ -1,5 +1,11 @@
 # Contributing
 
+These notes retain the earlier standalone ShareBus alpha.1 contributor workflow.
+Current Avalokita application source, checks and package-candidate instructions
+are in [README.md](README.md) and [CI-POLICY.md](CI-POLICY.md). The older wheel
+commands and source-pin tools below describe their original standalone snapshot;
+they do not validate the current integrated application candidate.
+
 This is development alpha source. Its finite reviewed runtime selection, public assets and notices are recorded in `SOURCE-MANIFEST.json`. The commands below are contributor workflows; consumer Windows packaging and its acceptance are separate deliverables.
 
 ## Developer layout

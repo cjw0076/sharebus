@@ -1,0 +1,359 @@
+diff --git a/src/avalokita.rs b/src/avalokita.rs
+index d91e1a0..045b076 100644
+--- a/src/avalokita.rs
++++ b/src/avalokita.rs
+@@ -15,6 +15,7 @@ use std::{
+ 
+ const CONTRACT: &str = "avalokita.reason/1";
+ const MAX_LINE: u64 = 96 * 1024;
++const MAX_QUEUE_STDOUT: u64 = 4096;
+ 
+ #[derive(Clone, Deserialize, Serialize)]
+ #[serde(deny_unknown_fields)]
+@@ -218,26 +219,60 @@ fn database(path: &Path) -> io::Result<Connection> {
+     let db = Connection::open(path).map_err(|_| fail("ledger_unavailable"))?;
+     db.busy_timeout(Duration::from_secs(3)).map_err(|_| fail("ledger_unavailable"))?;
+     db.execute_batch("PRAGMA synchronous=FULL; CREATE TABLE IF NOT EXISTS avalokita_reason_attempts (
+-        dispatch_id TEXT PRIMARY KEY, fingerprint TEXT NOT NULL, binding_key TEXT NOT NULL, state TEXT NOT NULL, receipt TEXT NOT NULL)")
++        dispatch_id TEXT PRIMARY KEY, fingerprint TEXT NOT NULL, binding_key TEXT NOT NULL, state TEXT NOT NULL, receipt TEXT NOT NULL);
++        CREATE TABLE IF NOT EXISTS avalokita_reason_queue_receipts (
++        dispatch_id TEXT PRIMARY KEY, fingerprint TEXT NOT NULL, binding_key TEXT NOT NULL, native_id TEXT NOT NULL,
++        queued_submission_id TEXT NOT NULL, selected_input_sha256 TEXT NOT NULL, authorization_sha256 TEXT NOT NULL,
++        deadline_unix_ms INTEGER NOT NULL, receipt TEXT NOT NULL)")
+         .map_err(|_| fail("ledger_unavailable"))?;
+     Ok(db)
+ }
+ 
+ fn prior(request: &Request, hash: &str) -> io::Result<Option<Value>> {
+     let db = database(&request.ledger_path)?;
+-    let row: Option<(String, String)> = db
++    let row: Option<(String, String, String)> = db
+         .query_row(
+-            "SELECT fingerprint,receipt FROM avalokita_reason_attempts WHERE dispatch_id=?1",
++            "SELECT fingerprint,receipt,binding_key FROM avalokita_reason_attempts WHERE dispatch_id=?1",
+             [&request.dispatch_id],
+-            |r| Ok((r.get(0)?, r.get(1)?)),
++            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+         )
+         .optional()
+         .map_err(|_| fail("ledger_unavailable"))?;
+-    row.map(|(fingerprint, text)| {
++    row.map(|(fingerprint, text, binding_key)| {
+         if fingerprint != hash {
+             return Err(fail("dispatch_identity_reused"));
+         }
+         let mut receipt: Value = serde_json::from_str(&text).map_err(|_| fail("ledger_unavailable"))?;
++        let queue: Option<(String, String, String)> = db
++            .query_row(
++                "SELECT fingerprint,binding_key,receipt FROM avalokita_reason_queue_receipts WHERE dispatch_id=?1",
++                [&request.dispatch_id],
++                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
++            )
++            .optional()
++            .map_err(|_| fail("ledger_unavailable"))?;
++        if let Some((queue_fingerprint, queue_binding_key, text)) = queue {
++            if queue_fingerprint != hash || queue_binding_key != binding_key || request.binding.provider != "codex" {
++                return Err(fail("native_queue_receipt_conflict"));
++            }
++            receipt["queue_receipt"] = serde_json::from_str(&text).map_err(|_| fail("ledger_unavailable"))?;
++        }
++        if matches!(receipt["state"].as_str(), Some("native_input_verified" | "native_result_verified")) {
++            // Authenticated observations belong to the adapter's monotonic state, not our wire authority.
++            let accepted = if request.binding.provider == "codex" {
++                receipt.get("queue_receipt").is_some()
++            } else {
++                receipt["transport_accepted"] == true
++            };
++            receipt["state"] = json!(if accepted { "transport_accepted" } else { "delivery_unknown" });
++            receipt["transport_accepted"] = json!(accepted);
++            receipt["native_accepted"] = json!(false);
++            receipt["native_result_verified"] = json!(false);
++            receipt.as_object_mut().ok_or_else(|| fail("ledger_unavailable"))?.remove("native_observation");
++            if receipt.get("queue_receipt").is_some() {
++                receipt["transport"] = json!("codex_queue_accepted");
++            }
++        }
+         receipt["duplicate_suppressed"] = json!(true);
+         Ok(receipt)
+     })
+@@ -270,6 +305,63 @@ fn save(request: &Request, hash: &str, receipt: &Value, first: bool) -> io::Resu
+     {
+         return Err(fail("target_delivery_unknown"));
+     }
++    if let Some(queue) = receipt.get("queue_receipt") {
++        if first
++            || request.binding.provider != "codex"
++            || queue["contract"] != "avalokita.codex-queue/1"
++            || queue["native_id"] != request.binding.native_id
++            || queue["engine_request_sha256"] != hash
++            || queue["selected_input_sha256"] != sha256(request.prompt.as_bytes())
++            || queue["authorization_sha256"] != request.authorization_sha256
++            || queue["deadline_unix_ms"] != request.deadline_unix_ms
++            || queue["executable_sha256"].as_str() != request.binding.executable_sha256.as_deref()
++        {
++            return Err(fail("native_queue_receipt_conflict"));
++        }
++        let attempt: Option<(String, String)> = tx
++            .query_row(
++                "SELECT fingerprint,binding_key FROM avalokita_reason_attempts WHERE dispatch_id=?1",
++                [&request.dispatch_id],
++                |r| Ok((r.get(0)?, r.get(1)?)),
++            )
++            .optional()
++            .map_err(|_| fail("ledger_unavailable"))?;
++        if attempt.as_ref().is_none_or(|(fingerprint, key)| fingerprint != hash || key != &binding_key) {
++            return Err(fail("native_queue_receipt_conflict"));
++        }
++        let previous: Option<(String, String, String)> = tx
++            .query_row(
++                "SELECT fingerprint,binding_key,receipt FROM avalokita_reason_queue_receipts WHERE dispatch_id=?1",
++                [&request.dispatch_id],
++                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
++            )
++            .optional()
++            .map_err(|_| fail("ledger_unavailable"))?;
++        if let Some((fingerprint, key, text)) = previous {
++            let saved: Value = serde_json::from_str(&text).map_err(|_| fail("ledger_unavailable"))?;
++            if fingerprint != hash || key != binding_key || saved != *queue {
++                return Err(fail("native_queue_receipt_conflict"));
++            }
++        } else {
++            // Queue identity is immutable and separate from a callback's monotonic attempt receipt.
++            // The Python observation trigger may restore that receipt wholesale after this commit.
++            tx.execute(
++                "INSERT INTO avalokita_reason_queue_receipts VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9)",
++                params![
++                    request.dispatch_id,
++                    hash,
++                    binding_key,
++                    request.binding.native_id,
++                    queue["queued_submission_id"].as_str(),
++                    queue["selected_input_sha256"].as_str(),
++                    request.authorization_sha256,
++                    request.deadline_unix_ms,
++                    queue.to_string()
++                ],
++            )
++            .map_err(|_| fail("ledger_unavailable"))?;
++        }
++    }
+     let changed = if first {
+         tx.execute(
+             "INSERT OR IGNORE INTO avalokita_reason_attempts VALUES (?1,?2,?3,?4,?5)",
+@@ -391,6 +483,31 @@ fn codex_command_line_units(binding: &Binding, prompt: &str) -> io::Result<usize
+     Ok(total)
+ }
+ 
++fn codex_queue_id<'a>(output: &'a [u8], native_id: &str) -> io::Result<&'a str> {
++    if output.len() as u64 > MAX_QUEUE_STDOUT {
++        return Err(fail("native_queue_output_limit"));
++    }
++    let text = std::str::from_utf8(output).map_err(|_| fail("native_queue_receipt_invalid"))?;
++    let line = text
++        .strip_suffix("\r\n")
++        .or_else(|| text.strip_suffix('\n'))
++        .ok_or_else(|| fail("native_queue_receipt_invalid"))?;
++    if line.chars().any(char::is_control) {
++        return Err(fail("native_queue_receipt_invalid"));
++    }
++    // Codex 51f97c6bca55: session_queue_commands.rs:78-81, then println in cli/main.rs.
++    // Anchor the whole output to the selected thread; do not search or trim native output.
++    let suffix = format!(" for thread {native_id}.");
++    let id = line
++        .strip_prefix("Queued message ")
++        .and_then(|value| value.strip_suffix(&suffix))
++        .ok_or_else(|| fail("native_queue_receipt_invalid"))?;
++    if id.is_empty() || id.len() > 512 || id.chars().any(|c| c.is_whitespace() || c.is_control()) {
++        return Err(fail("native_queue_receipt_invalid"));
++    }
++    Ok(id)
++}
++
+ async fn deliver(request: &Request, input: &mut impl BufRead, result: &mut Value) -> io::Result<()> {
+     if request.contract != CONTRACT
+         || request.prompt.is_empty()
+@@ -432,22 +549,47 @@ async fn deliver(request: &Request, input: &mut impl BufRead, result: &mut Value
+                 .args(["queue", "--thread", &request.binding.native_id, "--message", &request.prompt])
+                 .current_dir(&request.binding.workspace)
+                 .stdin(Stdio::null())
+-                .stdout(Stdio::null())
++                .stdout(Stdio::piped())
+                 .stderr(Stdio::null())
+                 .kill_on_drop(true);
+             let mut child = command.spawn().map_err(|_| fail("native_spawn_unavailable"))?;
+             // Leave time for the parent to read our receipt after we have killed/reaped a timed-out queue helper.
+             let milliseconds = (request.deadline_unix_ms - util::now_ms()).clamp(1, 30000) as u64;
+             let milliseconds = milliseconds.min(request.operation_timeout_ms.saturating_sub(2000).max(1));
+-            match tokio::time::timeout(Duration::from_millis(milliseconds), child.wait()).await {
+-                Ok(Ok(status)) if status.success() => result["transport"] = json!("codex_queue_accepted"),
+-                Ok(Ok(_)) => return Err(fail("native_queue_uncertain")),
+-                Ok(Err(_)) => return Err(fail("native_queue_uncertain")),
++            let completed = tokio::time::timeout(Duration::from_millis(milliseconds), async {
++                let stdout = child.stdout.take().ok_or_else(|| fail("native_queue_uncertain"))?;
++                let mut bounded = tokio::io::AsyncReadExt::take(stdout, MAX_QUEUE_STDOUT + 1);
++                let mut output = Vec::new();
++                tokio::io::AsyncReadExt::read_to_end(&mut bounded, &mut output)
++                    .await
++                    .map_err(|_| fail("native_queue_uncertain"))?;
++                if output.len() as u64 > MAX_QUEUE_STDOUT {
++                    return Err(fail("native_queue_output_limit"));
++                }
++                if !child.wait().await.map_err(|_| fail("native_queue_uncertain"))?.success() {
++                    return Err(fail("native_queue_uncertain"));
++                }
++                Ok(output)
++            })
++            .await;
++            let output = match completed {
++                Ok(Ok(output)) => output,
++                Ok(Err(error)) => {
++                    let _ = child.kill().await;
++                    return Err(error);
++                }
+                 Err(_) => {
+                     let _ = child.kill().await;
+                     return Err(fail("native_timeout"));
+                 }
+-            }
++            };
++            let queue_id = codex_queue_id(&output, &request.binding.native_id)?;
++            result["queue_receipt"] = json!({"contract": "avalokita.codex-queue/1",
++                "queued_submission_id": queue_id, "native_id": request.binding.native_id,
++                "selected_input_sha256": sha256(request.prompt.as_bytes()), "engine_request_sha256": hash,
++                "authorization_sha256": request.authorization_sha256, "deadline_unix_ms": request.deadline_unix_ms,
++                "executable_sha256": request.binding.executable_sha256, "stdout_sha256": sha256(&output)});
++            result["transport"] = json!("codex_queue_accepted");
+         }
+         _ => return Err(fail("unsupported_provider")),
+     }
+@@ -480,6 +622,9 @@ pub async fn run() -> Result<()> {
+             "target_delivery_unknown",
+             "native_timeout",
+             "native_queue_uncertain",
++            "native_queue_receipt_invalid",
++            "native_queue_output_limit",
++            "native_queue_receipt_conflict",
+             "native_token_unavailable",
+             "ambiguous_native_token",
+             "native_spawn_unavailable",
+@@ -508,6 +653,40 @@ pub async fn run() -> Result<()> {
+ mod tests {
+     use super::*;
+ 
++    #[test]
++    fn queue_receipt_requires_one_exact_bounded_line_and_preserves_opaque_ids() {
++        for id in ["opaque:queue_01/+==", "not-a-uuid", "수신항목:1"] {
++            for ending in ["\n", "\r\n"] {
++                let output = format!("Queued message {id} for thread exact-thread.{ending}");
++                assert_eq!(codex_queue_id(output.as_bytes(), "exact-thread").unwrap(), id);
++            }
++        }
++        for output in [
++            b"".as_slice(),
++            b"Queued message q for thread different-thread.\n",
++            b"Queued message q for thread exact-thread\n",
++            b"Queued message q for thread exact-thread.",
++            b"Queued message  for thread exact-thread.\n",
++            b"Queued message q q for thread exact-thread.\n",
++            b"Queued message q\0 for thread exact-thread.\n",
++            b"Queued message q\x1b for thread exact-thread.\n",
++            b"Queued message \xff for thread exact-thread.\n",
++            b"log\nQueued message q for thread exact-thread.\n",
++            b"Queued message q for thread exact-thread.\n\n",
++            b"Queued message q for thread exact-thread.\nQueued message q for thread exact-thread.\n",
++        ] {
++            assert!(codex_queue_id(output, "exact-thread").is_err(), "{output:?}");
++        }
++        assert!(
++            codex_queue_id(
++                format!("Queued message {} for thread exact-thread.\n", "q".repeat(513)).as_bytes(),
++                "exact-thread"
++            )
++            .is_err()
++        );
++        assert!(codex_queue_id(&vec![b'q'; MAX_QUEUE_STDOUT as usize + 1], "exact-thread").is_err());
++    }
++
+     struct Fixture {
+         directory: PathBuf,
+         request: Request,
+@@ -620,6 +799,79 @@ mod tests {
+         assert!(prior(&fixture.request, &fixture.hash()).is_err());
+     }
+ 
++    #[test]
++    fn immutable_queue_facts_survive_an_earlier_native_observation_and_reopen() {
++        let fixture = Fixture::new();
++        let hash = fixture.hash();
++        let mut result = receipt(&fixture.request);
++        result["state"] = json!("delivery_unknown");
++        result["native_input_attempted"] = json!(true);
++        save(&fixture.request, &hash, &result, true).unwrap();
++        let db = database(&fixture.request.ledger_path).unwrap();
++        // Same production trigger as the frozen Python adapter; no actual native callback.
++        db.execute_batch("CREATE TRIGGER avalokita_reason_observation_monotonic
++            AFTER UPDATE ON avalokita_reason_attempts
++            WHEN (OLD.state='native_result_verified' AND NEW.state!='native_result_verified')
++                OR (OLD.state='native_input_verified' AND NEW.state NOT IN ('native_input_verified','native_result_verified'))
++            BEGIN UPDATE avalokita_reason_attempts SET state=OLD.state,receipt=OLD.receipt
++                WHERE dispatch_id=OLD.dispatch_id; END").unwrap();
++        let mut observed = result.clone();
++        observed["state"] = json!("native_result_verified");
++        observed["native_accepted"] = json!(true);
++        observed["native_result_verified"] = json!(true);
++        observed["native_observation"] = json!({"kind":"result_completed"});
++        db.execute(
++            "UPDATE avalokita_reason_attempts SET state=?1,receipt=?2 WHERE dispatch_id=?3",
++            params!["native_result_verified", observed.to_string(), fixture.request.dispatch_id],
++        )
++        .unwrap();
++        drop(db);
++        result["state"] = json!("transport_accepted");
++        result["transport_accepted"] = json!(true);
++        result["queue_receipt"] = json!({"contract":"avalokita.codex-queue/1", "queued_submission_id":"opaque:queue/1",
++            "native_id":fixture.request.binding.native_id, "selected_input_sha256":sha256(fixture.request.prompt.as_bytes()),
++            "engine_request_sha256":hash, "authorization_sha256":fixture.request.authorization_sha256,
++            "deadline_unix_ms":fixture.request.deadline_unix_ms, "executable_sha256":fixture.request.binding.executable_sha256,
++            "stdout_sha256":sha256(b"synthetic stdout")});
++        save(&fixture.request, &hash, &result, false).unwrap();
++        save(&fixture.request, &hash, &result, false).unwrap();
++        let reopened = prior(&fixture.request, &hash).unwrap().unwrap();
++        assert_eq!(reopened["state"], "transport_accepted");
++        assert_eq!(reopened["native_result_verified"], false);
++        assert!(reopened.get("native_observation").is_none());
++        let db = database(&fixture.request.ledger_path).unwrap();
++        let stored: String = db.query_row("SELECT state FROM avalokita_reason_attempts", [], |r| r.get(0)).unwrap();
++        assert_eq!(stored, "native_result_verified");
++        drop(db);
++        assert_eq!(reopened["queue_receipt"], result["queue_receipt"]);
++        result["queue_receipt"]["queued_submission_id"] = json!("different-queue");
++        assert_eq!(
++            save(&fixture.request, &hash, &result, false).unwrap_err().to_string(),
++            "native_queue_receipt_conflict"
++        );
++        assert_eq!(prior(&fixture.request, &hash).unwrap().unwrap()["queue_receipt"], reopened["queue_receipt"]);
++    }
++
++    #[test]
++    fn a_native_observation_without_an_exact_queue_row_is_not_transport_wire_authority() {
++        let fixture = Fixture::new();
++        let hash = fixture.hash();
++        let mut observed = receipt(&fixture.request);
++        observed["state"] = json!("native_result_verified");
++        observed["native_input_attempted"] = json!(true);
++        observed["transport_accepted"] = json!(true);
++        observed["native_accepted"] = json!(true);
++        observed["native_result_verified"] = json!(true);
++        observed["native_observation"] = json!({"kind":"result_completed"});
++        save(&fixture.request, &hash, &observed, true).unwrap();
++        let wire = prior(&fixture.request, &hash).unwrap().unwrap();
++        assert_eq!(wire["state"], "delivery_unknown");
++        assert_eq!(wire["transport_accepted"], false);
++        assert_eq!(wire["native_accepted"], false);
++        assert_eq!(wire["native_result_verified"], false);
++        assert!(wire.get("native_observation").is_none());
++    }
++
+     #[test]
+     fn a_delayed_durable_commit_cannot_cross_the_native_input_deadline() {
+         let mut fixture = Fixture::new();

@@ -19,7 +19,7 @@
       "visual": {"display_model": "Claude Opus 5.5", "model_id": null, "effort": "high", "tier": "frontier"}
     },
     "antigravity": {
-      "main": {"display_model": "Gemini Argon", "model_id": null, "effort": "high", "tier": "frontier"},
+      "main": {"display_model": "Gemini Argon", "model_id": "gemini-4-argon-high", "effort": "high", "tier": "frontier"},
       "routine": {"display_model": "Gemini Flash 3.8", "model_id": null, "effort": "medium", "tier": "economy"},
       "visual": {"display_model": "Gemini Argon", "model_id": null, "effort": "high", "tier": "frontier"}
     }

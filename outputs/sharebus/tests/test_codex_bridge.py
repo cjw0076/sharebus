@@ -56,16 +56,24 @@ def bus(tmp_path, monkeypatch):
                 assert request.get_header("Authorization") is None
                 value = {"ok": True, **runtime, **health_changes}
             else:
-                assert request.full_url == runtime["url"] + "/api/state"
                 assert request.get_header("Authorization") == "Bearer " + token
-                value = {"workspace": {"path": str(root), "id": store.workspace_id},
-                         "paused": store.paused(), "auto": store.auto_state(),
-                         "own_agent": store.agent(agent["id"]), "active_jobs": store.active_jobs(), **state_changes}
+                if request.full_url == runtime["url"] + "/api/native/dispatch":
+                    payload = json.loads(request.data)
+                    assert payload["workspace_id"] == store.workspace_id and payload["runtime_nonce"] == runtime["nonce"]
+                    value = {"dispatch": store.reserve_native_input(agent["id"], payload["job_id"], payload["event_id"],
+                        payload["root_id"], payload["native_session_id"], generation=payload["generation"],
+                        provider=payload["provider"], native_address=payload["native_address"])}
+                else:
+                    assert request.full_url == runtime["url"] + "/api/state"
+                    value = {"workspace": {"path": str(root), "id": store.workspace_id},
+                             "paused": store.paused(), "auto": store.auto_state(),
+                             "own_agent": store.agent(agent["id"]), "active_jobs": store.active_jobs(), **state_changes}
             return io.BytesIO(json.dumps(value).encode("utf-8"))
 
     client = BusClient("codex", root)
     client.opener = Opener()
     monkeypatch.setattr(bridge, "BusClient", lambda provider, workspace: client)
+    monkeypatch.setattr(sys.modules["mcp_server"], "BusClient", lambda provider, workspace: client)
     monkeypatch.setattr(bridge, "_PROBES", {})
     executable = root / "bin/codex.exe"
     executable.parent.mkdir()

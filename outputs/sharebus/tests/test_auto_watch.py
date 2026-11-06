@@ -58,6 +58,8 @@ def room(tmp_path, monkeypatch):
     def job(**extra):
         return {"id": str(uuid.uuid4()), "event_id": str(uuid.uuid4()), "root_id": str(uuid.uuid4()),
                 "state": "queued", "budget_remaining": 2, "created_at": 1, "deadline": 2000,
+                "execution_owner": None, "native_input_reserved_at": None,
+                "execution_route": "manual_inbox", "manual_receive_allowed": True,
                 "body": "PRIVATE_PEER_BODY", **extra}
 
     def bootstrap(provider, value, **kwargs):
@@ -128,6 +130,9 @@ def test_new_canonical_job_nudges_exact_actor_without_injecting_body_or_claiming
     assert job["id"] in result["reason"] and job["event_id"] in result["reason"]
     assert "PRIVATE" not in result["reason"] and "test-private-token" not in result["reason"]
     assert "not new human authority" in result["reason"]
+    assert "sharebus_receive" in result["reason"]
+    assert "auto_enroll.py receive --context-file" in result["reason"]
+    assert "read and claim" not in result["reason"]
 
 
 def test_stop_hook_active_keeps_waiting_for_distinct_jobs_and_suppresses_duplicate_nudges(room):
@@ -521,3 +526,79 @@ def test_bus_error_is_private_and_never_becomes_a_wake(room):
     result = room.run()
     assert result["state"] == "offline" and "reason" not in result
     assert "SENSITIVE" not in json.dumps(room.observations)
+
+
+@pytest.mark.parametrize("provider", ["claude", "codex"])
+def test_native_automatic_mode_has_no_manual_stop_fallback(room, provider):
+    room.binding["provider"] = provider
+    pending = room.pending(queued=[room.job()], channel_available=False)
+    pending["agent"]["mode"] = "native_attached"
+    room.response = pending
+    result = room.run(provider)
+    assert result["state"] == "offline" and "reason" not in result and result["jobs"] == []
+    assert room.pending_count == 1
+
+
+@pytest.mark.parametrize("mutation", [
+    {"execution_owner": "native_dispatch"}, {"execution_owner": "managed_runtime"},
+    {"execution_route": "native_dispatch"}, {"execution_route": "legacy_unknown"},
+    {"manual_receive_allowed": False}, {"manual_receive_allowed": None},
+    {"native_input_reserved_at": 998},
+])
+def test_external_attached_direct_native_or_unknown_route_never_nudges(room, mutation):
+    room.response = room.pending(queued=[room.job(**mutation)], channel_available=False)
+    result = room.run()
+    assert result["state"] == "waiting" and "reason" not in result and result["jobs"] == []
+
+
+def test_old_pending_schema_without_canonical_route_is_not_manual_authority(room):
+    job = room.job()
+    for key in ("execution_route", "execution_owner", "native_input_reserved_at", "manual_receive_allowed"):
+        job.pop(key)
+    room.response = room.pending(queued=[job])
+    assert room.run()["state"] == "waiting"
+
+
+@pytest.mark.parametrize("missing", [
+    ("execution_owner",), ("native_input_reserved_at",),
+    ("execution_owner", "native_input_reserved_at"),
+])
+def test_partial_pending_schema_missing_nullable_authority_fields_never_nudges(room, missing):
+    job = room.job()
+    for key in missing:
+        job.pop(key)
+    room.response = room.pending(queued=[job])
+    assert auto_watch._queued(room.response, room.binding, 1000) == []
+    result = room.run()
+    assert result["state"] == "waiting" and result["jobs"] == [] and "reason" not in result
+    assert not auto_watch._files(room.root, "codex", room.native)[2].exists()
+
+
+@pytest.mark.parametrize("missing", ["execution_owner", "native_input_reserved_at"])
+def test_final_pending_recheck_rejects_partial_nullable_schema_before_emit(room, missing):
+    first = room.pending(queued=[room.job()])
+    second = copy.deepcopy(first)
+    second["queued"][0].pop(missing)
+    room.responses = [first, second]
+    result = room.run()
+    assert result["jobs"] == [] and "reason" not in result and room.pending_count >= 2
+    assert not auto_watch._files(room.root, "codex", room.native)[2].exists()
+
+
+@pytest.mark.parametrize("changed", ["mode", "route", "owner", "reservation"])
+def test_final_pending_recheck_prevents_mode_or_route_change_before_emit(room, changed):
+    first = room.pending(queued=[room.job()])
+    second = copy.deepcopy(first)
+    if changed == "mode":
+        second["agent"]["mode"] = "native_attached"
+    elif changed == "route":
+        second["queued"][0]["execution_route"] = "native_dispatch"
+    elif changed == "owner":
+        second["queued"][0]["execution_owner"] = "native_dispatch"
+    else:
+        second["queued"][0]["native_input_reserved_at"] = 999
+    room.responses = [first, second]
+    result = room.run()
+    assert "reason" not in result and result["jobs"] == []
+    assert room.pending_count >= 2
+    assert not list((room.root / ".sharebus/private/auto/watchers").glob("*.notified.json"))

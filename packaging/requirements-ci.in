@@ -1,0 +1,4 @@
+mcp==1.30.0
+agent-client-protocol==0.12.1
+cryptography==50.0.2
+pywin32==312; sys_platform == "win32"

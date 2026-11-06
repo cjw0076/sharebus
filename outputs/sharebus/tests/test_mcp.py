@@ -27,7 +27,7 @@ from daemon import BusHTTPServer
 import hooks_bridge
 from hooks_bridge import forward
 from install import apply, codex_update, install_auto, prepare, server_entry
-from mcp_server import BusClient, BusError, TOOLS
+from mcp_server import BusClient, BusError, MANAGED_TOOLS, TOOLS
 
 
 @asynccontextmanager
@@ -90,6 +90,10 @@ class MCPTests(unittest.IsolatedAsyncioTestCase):
         bindings = {"SHAREBUS_WORKSPACE": str(self.root), "SHAREBUS_AGENT_ID": agent["id"],
                     "SHAREBUS_AGENT_TOKEN_FILE": str(self.root / ".sharebus/private/credentials" / (agent["id"] + ".token"))}
         async with connection(self.root, "claude", bindings) as session:
+            managed_tools = {tool.name for tool in (await session.list_tools()).tools}
+            self.assertEqual(managed_tools, set(MANAGED_TOOLS))
+            self.assertEqual(len(managed_tools), 8)
+            self.assertNotIn("sharebus_receive", managed_tools)
             joined = await invoke(session, "sharebus_join")
             self.assertTrue(joined["managed"])
             self.assertNotIn("session_token", joined)
@@ -166,7 +170,9 @@ class MCPTests(unittest.IsolatedAsyncioTestCase):
             peer, _ = self.server.store.register("codex", "peer", mode="external_attached", native_session_id="codex-peer")
             human = self.server.store.send("user", joined["agent"]["id"], "actual current user task", "task")
             read = await invoke(session, "sharebus_read", arguments)
-            job = read["inbox"]["jobs"][0]
+            self.assertEqual(read["inbox"]["jobs"], [])
+            received = await invoke(session, "sharebus_receive", arguments)
+            job = received["inbox"]["jobs"][0]
             sent = await invoke(session, "sharebus_send", {**arguments, "to": peer["id"], "body": "scoped handoff", "kind": "task"})
             self.assertEqual(sent["root_id"], human["root_id"])
             published = await invoke(session, "sharebus_publish", {**arguments, "text": "selected output", "filename": "chosen.txt"})
@@ -188,11 +194,14 @@ class MCPTests(unittest.IsolatedAsyncioTestCase):
             self.assertTrue(unauthorized.isError)
             human = self.server.store.send("user", first["agent"]["id"], "사용자 목표", "task")
             inbox = await invoke(codex, "sharebus_read", one)
-            self.assertEqual(len(inbox["inbox"]["jobs"]), 1)
+            self.assertEqual(inbox["inbox"]["jobs"], [])
+            accepted = await invoke(codex, "sharebus_receive", one)
+            self.assertEqual(len(accepted["inbox"]["jobs"]), 1)
             delegated = await invoke(codex, "sharebus_send", {**one, "to": second["agent"]["id"], "body": "레퍼런스를 조사해줘", "kind": "task"})
             self.assertEqual(delegated["root_id"], human["root_id"])
             received = await invoke(claude, "sharebus_read", two)
-            job = received["inbox"]["jobs"][0]
+            accepted = await invoke(claude, "sharebus_receive", two)
+            job = accepted["inbox"]["jobs"][0]
             await invoke(claude, "sharebus_read", {**two, "after": received["last_seq"], "ack": [job["id"]]})
             done = next(item for item in self.server.store.jobs() if item["id"] == job["id"])
             self.assertEqual(done["state"], "completed")
@@ -293,6 +302,7 @@ class MCPTests(unittest.IsolatedAsyncioTestCase):
                 human = self.server.store.send("user", agent["id"], f"native task {number}", "task")
                 job = self.server.store.claim(agent["id"])
                 self.assertIsNotNone(job, "The next native job must become claimable after completion.")
+                self.server.store.reserve_native_input(agent["id"], job["id"], job["event_id"], job["root_id"], native_id)
                 self.server.store.await_native(job["id"], "synthetic native transport receipt")
                 completion = {"session_token": token, "to": "user", "kind": "result", "body": f"native result {number}",
                               "job_id": job["id"], "event_id": human["event"]["id"], "native_session_id": native_id}
@@ -347,6 +357,7 @@ class MCPTests(unittest.IsolatedAsyncioTestCase):
         agent, _ = self.server.store.register("claude", "CTO", mode="native_attached", native_session_id="native-target")
         human = self.server.store.send("user", agent["id"], "native task", "task")
         job = self.server.store.claim(agent["id"])
+        self.server.store.reserve_native_input(agent["id"], job["id"], job["event_id"], job["root_id"], "native-target")
         self.server.store.await_native(job["id"], "verified test transport")
         (self.root / ".sharebus/enabled").write_text("enabled", encoding="utf-8")
         return agent, human, job
@@ -413,6 +424,7 @@ class MCPTests(unittest.IsolatedAsyncioTestCase):
         self.server.store.native_result(agent["id"], "native-target", "explicit selected completion", job["id"], human["event"]["id"])
         self.server.store.send("user", agent["id"], "newer selected task", "task")
         newer = self.server.store.claim(agent["id"])
+        self.server.store.reserve_native_input(agent["id"], newer["id"], newer["event_id"], newer["root_id"], "native-target")
         self.server.store.await_native(newer["id"], "verified newer fixture transport")
         self.assert_native_stop_ignored({**payload, "hook_event_name": "Stop",
                                          "last_assistant_message": "private output after the completed prior job"})
@@ -549,7 +561,6 @@ class MCPTests(unittest.IsolatedAsyncioTestCase):
 
 class InstallerTests(unittest.TestCase):
     def test_codex_queue_mode_removes_only_owned_waiters_and_preserves_manifest_choice(self):
-        python = Path(sys.executable).resolve()
         with tempfile.TemporaryDirectory(prefix="sharebus-queue-install-") as directory:
             root = Path(directory)
             home, workspace = root / "home", root / "workspace"
@@ -558,7 +569,7 @@ class InstallerTests(unittest.TestCase):
             codex = workspace / ".codex/hooks.json"
             global_codex = home / ".codex/hooks.json"
             claude = workspace / ".claude/settings.local.json"
-            first = prepare(home, python, hooks_workspace=workspace, auto_hooks=True,
+            first = prepare(home, Path(sys.executable), hooks_workspace=workspace, auto_hooks=True,
                             watch_timeout=1, codex_native_queue=False)
             apply(first, root / "first-backups")
 
@@ -586,7 +597,7 @@ class InstallerTests(unittest.TestCase):
             global_config["hooks"]["Stop"] = [{"hooks": [watcher, custom_stop]}]
             global_codex.write_text(json.dumps(global_config), encoding="utf-8")
             claude_before = claude.read_text(encoding="utf-8")
-            plan = prepare(home, python, hooks_workspace=workspace, auto_hooks=True, codex_native_queue=True)
+            plan = prepare(home, Path(sys.executable), hooks_workspace=workspace, auto_hooks=True, codex_native_queue=True)
             selected = json.loads(plan[codex])
             self.assertNotIn(watcher, handlers(selected, "Stop"))
             self.assertNotIn(cancel, handlers(selected, "Interrupt"))
@@ -606,23 +617,23 @@ class InstallerTests(unittest.TestCase):
             apply(plan, root / "queue-backups")
             self.assertGreater(len(list((root / "queue-backups").glob("*.bak"))), 0)
             with patch("install.subprocess.run") as run, patch("install.subprocess.Popen") as popen:
-                receipt = install_auto(workspace, home=home, python=python, codex_native_queue=None)
+                receipt = install_auto(workspace, home=home, python=Path(sys.executable), codex_native_queue=None)
                 run.assert_not_called()
                 popen.assert_not_called()
             self.assertIs(receipt["codex_native_queue"], True)
             self.assertEqual(receipt["codex_delivery"], "native_queue")
             self.assertFalse(receipt["applied"])
             self.assertEqual(receipt["native_messages_sent"], 0)
-            unchanged = prepare(home, python, hooks_workspace=workspace, auto_hooks=True)
+            unchanged = prepare(home, Path(sys.executable), hooks_workspace=workspace, auto_hooks=True)
             self.assertEqual(json.loads(unchanged[codex]), selected)
-            restored = prepare(home, python, hooks_workspace=workspace, auto_hooks=True, codex_native_queue=False)
+            restored = prepare(home, Path(sys.executable), hooks_workspace=workspace, auto_hooks=True, codex_native_queue=False)
             restored_config = json.loads(restored[codex])
             self.assertIn(watcher, handlers(restored_config, "Stop"))
             self.assertIn(cancel, handlers(restored_config, "Interrupt"))
             self.assertIn(foreign, handlers(restored_config, "Stop"))
             self.assertEqual(restored[claude], claude_before)
             apply(restored, root / "fallback-backups")
-            self.assertIs(install_auto(workspace, home=home, python=python)["codex_native_queue"], False)
+            self.assertIs(install_auto(workspace, home=home, python=Path(sys.executable))["codex_native_queue"], False)
 
     def test_queue_selection_is_typed_and_manifest_update_uses_cas(self):
         with tempfile.TemporaryDirectory(prefix="sharebus-queue-cas-") as directory:

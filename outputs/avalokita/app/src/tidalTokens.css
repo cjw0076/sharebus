@@ -1,0 +1,150 @@
+/*
+ * Avalokita Main UI — Approved Design Tokens (Tidal · Clear Day)
+ * Canonical Figma: dE75L7mM6F8tBVC9kasem2 (Representative node: 2:216)
+ * Priority: HANDOFF.md final contrast-repaired values override initial build-tidal.js palette.
+ * Note: Standalone handoff token stylesheet; not automatically imported by the running app until wired.
+ */
+
+@font-face {
+  font-family: 'Pretendard Variable';
+  src: url('/assets/fonts/PretendardVariable.woff2') format('woff2');
+  font-weight: 100 900;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: 'Pretendard';
+  src: url('/assets/fonts/PretendardVariable.woff2') format('woff2');
+  font-weight: 100 900;
+  font-display: swap;
+}
+
+:root {
+  color-scheme: light;
+
+  /* 1. Font Families — Local Pretendard Variable primary, Figma fallback secondary */
+  --tide-font-sans: 'Pretendard Variable', 'Pretendard', 'Noto Sans KR', -apple-system, BlinkMacSystemFont, 'Malgun Gothic', sans-serif;
+  --tide-font-brand: 'Plus Jakarta Sans', 'Pretendard Variable', 'Pretendard', sans-serif;
+  --tide-font-mono: ui-monospace, 'SFMono-Regular', Menlo, Consolas, monospace;
+
+  /* 2. Core Surface & Water Palette (B Structure + A Spatial Depth) */
+  --tide-color-bg-canvas: #F8FCFF;
+  --tide-color-bg-surface: #FFFFFF;
+  --tide-color-bg-surface-translucent: rgba(255, 255, 255, 0.92);
+  --tide-color-bg-surface-badge: rgba(255, 255, 255, 0.86);
+  --tide-color-bg-scrim: rgba(22, 50, 79, 0.24);
+
+  --tide-color-water-surface: #E4F8FC;
+  --tide-color-water-depth: #C7EDF5;
+  --tide-color-water-ripple: #99D9E9;
+  --tide-color-water-focus: #57BBD4;
+  --tide-color-water-veil: rgba(228, 248, 252, 0.28);
+  --tide-color-water-horizon: rgba(247, 254, 255, 0.95);
+  --tide-color-water-refraction: rgba(148, 213, 231, 0.45);
+  --tide-color-water-interference: rgba(255, 255, 255, 0.96);
+  --tide-color-water-shadow: rgba(111, 185, 206, 0.13);
+
+  /* 3. Contrast-Repaired Typography & Semantic Status Colors (HANDOFF.md Final) */
+  --tide-color-text-primary: #16324F;     /* Ink: 12.6:1 on canvas */
+  --tide-color-text-secondary: #526B80;   /* Secondary body/event copy */
+  --tide-color-text-quiet: #5D778C;       /* Repaired from #70879A -> 4.54:1 on #F8FCFF */
+
+  --tide-color-border-default: #D9E7F0;
+  --tide-color-border-focus: #2D70C5;
+
+  --tide-color-action-primary: #2D70C5;   /* Repaired from #337DD6 -> 4.96:1 on #FFFFFF */
+  --tide-color-action-primary-hover: #245CA3;
+  --tide-color-action-soft: #EDF5FF;
+
+  --tide-color-status-working: #24767C;   /* Repaired from #2B8B91 -> 5.31:1 on #FFFFFF */
+  --tide-color-status-working-bg: #EBF8F9;
+  --tide-color-status-waiting: #996529;   /* Explicit human approval / input waiting */
+  --tide-color-status-waiting-bg: #FFF6E7;
+  --tide-color-status-idle: #5D778C;      /* Repaired from #6F8795 -> 4.68:1 on #FFFFFF, 4.54:1 on #F8FCFF */
+  --tide-color-status-error: #9E3B33;
+  --tide-color-status-error-bg: #FFF2F0;
+
+  /* 4. Provider Identity Accents (Workstation & Badge Accents) */
+  --tide-color-agent-claude: #F79862;
+  --tide-color-agent-claude-deep: #ED7D48;
+  --tide-color-agent-codex: #72ABFA;
+  --tide-color-agent-codex-deep: #367FDB;
+  --tide-color-agent-gemini: #A8DEEF;
+  --tide-color-agent-gemini-deep: #5BA8C9;
+  --tide-color-agent-guest: #9BB5C9;
+
+  /* 5. Spacing Scale (Figma Variable Collection: spacing/*) */
+  --tide-spacing-4: 4px;
+  --tide-spacing-8: 8px;
+  --tide-spacing-12: 12px;
+  --tide-spacing-16: 16px;
+  --tide-spacing-24: 24px;
+  --tide-spacing-32: 32px;
+  --tide-spacing-48: 48px;
+  --tide-spacing-56: 56px;
+
+  /* 6. Corner Radius Scale (Figma Variable Collection: radius/*) */
+  --tide-radius-12: 12px;
+  --tide-radius-20: 20px;
+  --tide-radius-28: 28px;
+  --tide-radius-999: 999px;
+
+  /* 7. Typography Scale — Strict >=12px DOM Floor Across All Breakpoints */
+  --tide-font-size-12: 12px;
+  --tide-line-height-12: 18px;
+  --tide-font-size-14: 14px;
+  --tide-line-height-14: 20px;
+  --tide-font-size-16: 16px;
+  --tide-line-height-16: 24px;
+  --tide-font-size-18: 18px;
+  --tide-line-height-18: 28px;
+  --tide-font-size-24: 24px;
+  --tide-line-height-24: 32px;
+
+  --tide-letter-spacing-brand: -0.8px;
+  --tide-letter-spacing-body: -0.2px;
+
+  /* 8. Elevation & Visual Depth */
+  --tide-shadow-float: 0 12px 28px rgba(50, 95, 128, 0.07);
+  --tide-shadow-composer: 0 14px 34px rgba(22, 50, 79, 0.08);
+  --tide-shadow-drawer: -12px 0 40px rgba(22, 50, 79, 0.10);
+  --tide-submersion-ratio: 0.33;
+
+  /* 9. Interactive Sizing & Breakpoint Constraints */
+  --tide-touch-target-min: 44px;
+  --tide-header-height-desktop: 64px;
+  --tide-header-height-mobile: 56px;
+  --tide-composer-max-width-desktop: 820px;
+  --tide-composer-max-width-tablet: 720px;
+  --tide-approval-max-width: 700px;
+  --tide-rail-width: 264px;
+  --tide-inspector-width: 320px;
+  --tide-drawer-width: 440px;
+
+  /* 10. Finite Motion & Ripple Cap Tokens */
+  --tide-motion-ease-water: cubic-bezier(0.22, 1, 0.36, 1);
+  --tide-motion-ease-ui: cubic-bezier(0.2, 0, 0, 1);
+  --tide-motion-ui-duration: 180ms;
+  --tide-motion-user-ripple-duration: 650ms;
+  --tide-motion-event-ripple-duration: 1800ms;
+  --tide-motion-peer-arc-duration: 1400ms;
+  --tide-motion-max-concurrent-ripples: 3;
+
+  /* 11. Legacy Variable Bridge for reference/frontend/{styles,ade}.css */
+  --ink: var(--tide-color-text-primary);
+  --muted: var(--tide-color-text-quiet);
+  --line: var(--tide-color-border-default);
+  --panel: var(--tide-color-bg-surface);
+  --claude: var(--tide-color-agent-claude-deep);
+  --codex: var(--tide-color-agent-codex-deep);
+  --gemini: var(--tide-color-agent-gemini-deep);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  :root {
+    --tide-motion-ui-duration: 0ms;
+    --tide-motion-user-ripple-duration: 0ms;
+    --tide-motion-event-ripple-duration: 0ms;
+    --tide-motion-peer-arc-duration: 0ms;
+  }
+}

@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import os
 import secrets
 import sqlite3
@@ -24,6 +25,9 @@ KINDS = WAKE_KINDS | {"progress", "result", "artifact", "notice"}
 PROVIDERS = {"codex", "claude", "antigravity", "chatgpt", "gemini", "cursor", "hermes", "other"}
 MAX_BODY = 64 * 1024
 MAX_ARTIFACT = 20 * 1024 * 1024
+EXECUTION_OWNERS = {"manual_inbox", "native_dispatch", "managed_runtime"}
+NATIVE_COMPLETION_DOMAINS = {"broker_native", "native_origin", "avalokita_direct"}
+_UNSET = object()
 
 
 class BusError(ValueError):
@@ -57,6 +61,8 @@ class BusStore:
         self.workspace_retired = False
         self._initialized = False
         self._database_initialized = False
+        self._native_completion_registration: tuple[object, Callable[..., dict[str, Any]]] | None = None
+        self._native_completion_lock = threading.RLock()
         self.guard_workspace()
         self.workspace = self.checked_workspace(workspace)
         self.sqlite_timeout = timeout
@@ -133,6 +139,8 @@ class BusStore:
                     id TEXT PRIMARY KEY,event_id TEXT NOT NULL,agent_id TEXT NOT NULL,
                     root_id TEXT NOT NULL,state TEXT NOT NULL,created_at REAL NOT NULL,
                     started_at REAL,finished_at REAL,generation INTEGER,error TEXT,priority INTEGER NOT NULL DEFAULT 0,
+                    execution_owner TEXT,native_input_reserved_at REAL,
+                    native_completion_domain TEXT,
                     UNIQUE(event_id,agent_id)
                 );
                 CREATE INDEX IF NOT EXISTS jobs_queue ON jobs(agent_id,state,created_at);
@@ -161,6 +169,9 @@ class BusStore:
                     agent_id TEXT PRIMARY KEY,state TEXT NOT NULL,note TEXT NOT NULL,updated_at REAL NOT NULL
                 );
             """)
+            # executescript commits implicitly. Serialize every migration read
+            # and ALTER together so parallel legacy first opens cannot race.
+            db.execute("BEGIN IMMEDIATE")
             if "role" not in {row[1] for row in db.execute("PRAGMA table_info(agents)")}:
                 db.execute("ALTER TABLE agents ADD COLUMN role TEXT NOT NULL DEFAULT ''")
             if "channel_verified" not in {row[1] for row in db.execute("PRAGMA table_info(agents)")}:
@@ -169,6 +180,27 @@ class BusStore:
                 db.execute("ALTER TABLE agents ADD COLUMN native_address TEXT")
             if "priority" not in {row[1] for row in db.execute("PRAGMA table_info(jobs)")}:
                 db.execute("ALTER TABLE jobs ADD COLUMN priority INTEGER NOT NULL DEFAULT 0")
+            if "execution_owner" not in {row[1] for row in db.execute("PRAGMA table_info(jobs)")}:
+                db.execute("ALTER TABLE jobs ADD COLUMN execution_owner TEXT")
+            if "native_input_reserved_at" not in {row[1] for row in db.execute("PRAGMA table_info(jobs)")}:
+                db.execute("ALTER TABLE jobs ADD COLUMN native_input_reserved_at REAL")
+            if "native_completion_domain" not in {row[1] for row in db.execute("PRAGMA table_info(jobs)")}:
+                db.execute("ALTER TABLE jobs ADD COLUMN native_completion_domain TEXT")
+            db.execute("""CREATE TRIGGER IF NOT EXISTS jobs_native_completion_insert
+                BEFORE INSERT ON jobs WHEN NEW.native_completion_domain IS NOT NULL AND
+                (NEW.native_completion_domain NOT IN ('broker_native','native_origin','avalokita_direct')
+                 OR NEW.execution_owner IS NOT 'native_dispatch')
+                BEGIN SELECT RAISE(ABORT,'Invalid native completion domain'); END""")
+            db.execute("""CREATE TRIGGER IF NOT EXISTS jobs_native_completion_update
+                BEFORE UPDATE OF native_completion_domain,execution_owner ON jobs WHEN
+                (OLD.native_completion_domain IS NOT NULL AND NEW.native_completion_domain IS NOT OLD.native_completion_domain)
+                OR (NEW.native_completion_domain IS NOT NULL AND
+                    (NEW.native_completion_domain NOT IN ('broker_native','native_origin','avalokita_direct')
+                     OR NEW.execution_owner IS NOT 'native_dispatch'))
+                OR (OLD.native_completion_domain IS NULL AND NEW.native_completion_domain IS NOT NULL AND
+                    (OLD.execution_owner IS NOT NULL OR OLD.state IS NOT 'queued' OR OLD.started_at IS NOT NULL
+                     OR OLD.finished_at IS NOT NULL OR OLD.native_input_reserved_at IS NOT NULL))
+                BEGIN SELECT RAISE(ABORT,'Native completion domain is immutable'); END""")
             if "native_hook_source" not in {row[1] for row in db.execute("PRAGMA table_info(auto_contexts)")}:
                 db.execute("ALTER TABLE auto_contexts ADD COLUMN native_hook_source TEXT")
             try:
@@ -236,6 +268,24 @@ class BusStore:
                 if (stat.S_ISLNK(info.st_mode) or getattr(info, "st_file_attributes", 0) & 0x400
                         or not stat.S_ISDIR(info.st_mode)):
                     raise BusError("Workspace storage must use real directories", 403)
+
+    def register_native_completion_handler(self, handler: Callable[..., dict[str, Any]]) -> Callable[[], None]:
+        """Install one owned local completion kernel; request data cannot install it."""
+        self.guard_workspace()
+        if not callable(handler):
+            raise BusError("Native completion handler must be local callable code", 409)
+        registration = (object(), handler)
+        with self._native_completion_lock:
+            if self._native_completion_registration is not None:
+                raise BusError("Native completion handler already belongs to an owned runtime", 409)
+            self._native_completion_registration = registration
+
+        def unregister() -> None:
+            with self._native_completion_lock:
+                if self._native_completion_registration is registration:
+                    self._native_completion_registration = None
+
+        return unregister
 
     def _check_database_files(self) -> None:
         if self._workspace_guard is None:
@@ -392,6 +442,8 @@ class BusStore:
             raise BusError("Invalid native conversation ID")
         if "native_address" in fields and (not isinstance(fields["native_address"], str) or not 1 <= len(fields["native_address"]) <= 256 or any(ch in fields["native_address"] for ch in "\n\r\x00")):
             raise BusError("Invalid native address")
+        if "generation" in fields and (type(fields["generation"]) is not int or fields["generation"] < 0):
+            raise BusError("Invalid agent generation")
         if "capabilities" in fields:
             capabilities = fields["capabilities"]
             if not isinstance(capabilities, list) or len(capabilities) > 32 or any(not isinstance(item, str) or len(item) > 100 for item in capabilities):
@@ -400,6 +452,19 @@ class BusStore:
         fields["updated_at"] = time.time()
         try:
             with self.connection() as db:
+                db.execute("BEGIN IMMEDIATE")
+                current = db.execute("SELECT * FROM agents WHERE id=?", (agent_id,)).fetchone()
+                if current is None:
+                    raise BusError("Unknown agent", 404)
+                rebound = any(key in fields and fields[key] != current[key]
+                              for key in ("native_session_id", "native_address"))
+                if "generation" in fields:
+                    if fields["generation"] < current["generation"] or rebound and fields["generation"] == current["generation"]:
+                        raise BusError("Agent generation cannot adopt an older native binding", 409)
+                elif rebound:
+                    fields["generation"] = current["generation"] + 1
+                if rebound:
+                    fields["channel_verified"] = False
                 count = db.execute("UPDATE agents SET " + ",".join(f"{key}=?" for key in fields) + " WHERE id=?", [*fields.values(), agent_id]).rowcount
                 if not count:
                     raise BusError("Unknown agent", 404)
@@ -422,7 +487,7 @@ class BusStore:
                     raise BusError("Bound native conversation cannot be changed by heartbeat", 403)
                 if agent["mode"] in {"external", "external_attached"} and not agent["native_session_id"]:
                     try:
-                        db.execute("UPDATE agents SET native_session_id=? WHERE id=?", (native_session_id, agent_id))
+                        db.execute("UPDATE agents SET native_session_id=?,generation=generation+1,channel_verified=0 WHERE id=?", (native_session_id, agent_id))
                     except sqlite3.IntegrityError:
                         raise BusError("Native conversation is already bound to another agent", 409) from None
             # A model heartbeat cannot undo operator control or a durable job's
@@ -450,6 +515,7 @@ class BusStore:
             raise BusError("Invalid or expired recovery code", 403)
         with self.connection() as db:
             db.execute("BEGIN IMMEDIATE")
+            origin = None
             recovery = db.execute("SELECT * FROM recovery_codes WHERE code_hash=?", (_hash(code),)).fetchone()
             if recovery is None or recovery["used_at"] is not None or recovery["expires_at"] <= time.time():
                 raise BusError("Invalid, expired, or consumed recovery code", 403)
@@ -610,16 +676,25 @@ class BusStore:
         return {"auto": self.auto_state()}
 
     def auto_pending(self, actor: str) -> dict[str, Any]:
-        agent = self.agent(actor)
         with self.connection() as db:
+            db.execute("BEGIN")
+            current = db.execute("SELECT * FROM agents WHERE id=?", (actor,)).fetchone()
+            if current is None:
+                raise BusError("Unknown agent", 404)
+            agent = self._public_agent(current)
             auto = self._auto_flags(db)
             control = db.execute("SELECT epoch FROM auto_controls WHERE agent_id=?", (actor,)).fetchone()
             epoch = max(auto["updated_at"], control[0] if control else 0)
             active = db.execute("SELECT 1 FROM jobs WHERE agent_id=? AND state IN ('running','awaiting_native_reply','waiting_user') LIMIT 1", (actor,)).fetchone() is not None
-            rows = db.execute("SELECT j.id,j.event_id,j.root_id,j.state,j.created_at,(r.budget-r.used) AS budget_remaining,r.deadline FROM jobs j JOIN roots r ON r.id=j.root_id WHERE j.agent_id=? AND j.state='queued' AND r.deadline>? AND r.used<r.budget ORDER BY j.priority DESC,j.created_at,j.id", (actor, time.time())).fetchall()
+            rows = db.execute("SELECT j.*,(r.budget-r.used) AS budget_remaining,r.deadline FROM jobs j JOIN roots r ON r.id=j.root_id WHERE j.agent_id=? AND j.state='queued' AND r.deadline>? AND r.used<r.budget ORDER BY j.priority DESC,j.created_at,j.id", (actor, time.time())).fetchall()
+            queued = []
+            for row in rows:
+                route, eligible = self._execution_route_in(db, current, row)
+                queued.append({key: row[key] for key in ("id", "event_id", "root_id", "agent_id", "state", "created_at", "budget_remaining", "deadline", "execution_owner", "native_input_reserved_at")})
+                queued[-1].update(execution_route=route, manual_receive_allowed=eligible)
         return {"agent": agent, "paused": auto["paused"], "auto": auto, "control_epoch": epoch,
-                "wake_allowed": bool(auto["active"] and agent["mode"] in {"external", "external_attached"} and agent["state"] == "idle" and not active and rows),
-                "queued": [dict(row) for row in rows]}
+                "wake_allowed": bool(auto["active"] and agent["mode"] in {"external", "external_attached"} and agent["state"] == "idle" and not active and any(row["manual_receive_allowed"] for row in queued)),
+                "queued": queued}
 
     def checked_auto_path(self, path: str | Path, *, must_exist: bool = False) -> Path:
         self.guard_workspace()
@@ -823,6 +898,7 @@ class BusStore:
     def _event(row: sqlite3.Row) -> dict[str, Any]:
         event = dict(row)
         event["metadata"] = json.loads(event["metadata"])
+        event["can_execute"] = False
         return event
 
     def events(self, after: int = 0, limit: int = 200) -> dict[str, Any]:
@@ -865,8 +941,10 @@ class BusStore:
             if native_origin:
                 if actor != "user":
                     raise BusError("Native human inputs need operator authentication", 403)
-                origin = db.execute("SELECT state FROM agents WHERE id=?", (native_origin,)).fetchone()
-                if origin is None or origin["state"] in {"paused", "stopped"} or db.execute("SELECT value FROM config WHERE key='paused'").fetchone()[0] == "true":
+                origin = db.execute("SELECT * FROM agents WHERE id=?", (native_origin,)).fetchone()
+                if (origin is None or origin["mode"] not in {"external_attached", "native_attached"}
+                        or not origin["native_session_id"] or origin["state"] in {"paused", "stopped"}
+                        or db.execute("SELECT value FROM config WHERE key='paused'").fetchone()[0] == "true"):
                     raise BusError("Human control paused or stopped this native participant", 409)
                 if db.execute("SELECT 1 FROM jobs WHERE agent_id=? AND state IN ('running','awaiting_native_reply')", (native_origin,)).fetchone():
                     raise BusError("This native session already has an active correlated turn", 409)
@@ -934,8 +1012,12 @@ class BusStore:
                         continue
                     job_id = _id()
                     state = "awaiting_native_reply" if recipient["id"] == native_origin else "queued"
-                    db.execute("INSERT INTO jobs (id,event_id,agent_id,root_id,state,created_at,priority) VALUES (?,?,?,?,?,?,?)",
-                               (job_id, event_id, recipient["id"], root_id, state, now, int(recipient["id"] in human_continuations)))
+                    is_origin = recipient["id"] == native_origin
+                    db.execute("INSERT INTO jobs (id,event_id,agent_id,root_id,state,created_at,priority,generation,execution_owner,native_input_reserved_at,native_completion_domain) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                               (job_id, event_id, recipient["id"], root_id, state, now, int(recipient["id"] in human_continuations),
+                                origin["generation"] if is_origin and origin is not None else None,
+                                "native_dispatch" if is_origin else None, now if is_origin else None,
+                                "native_origin" if is_origin else None))
                     if recipient["id"] == native_origin:
                         db.execute("UPDATE roots SET used=used+1 WHERE id=?", (root_id,))
                         db.execute("UPDATE agents SET state='awaiting_native_reply',active_root=?,updated_at=? WHERE id=?", (root_id, now, native_origin))
@@ -952,7 +1034,7 @@ class BusStore:
 
     def jobs(self) -> list[dict[str, Any]]:
         with self.connection() as db:
-            return [dict(row) for row in db.execute("SELECT id,event_id,agent_id,root_id,state,created_at,started_at,finished_at,error FROM jobs ORDER BY created_at DESC LIMIT 100")]
+            return [dict(row) for row in db.execute("SELECT id,event_id,agent_id,root_id,state,created_at,started_at,finished_at,error,execution_owner,native_input_reserved_at FROM jobs ORDER BY created_at DESC LIMIT 100")]
 
     def has_active_job(self, agent_id: str) -> bool:
         with self.connection() as db:
@@ -960,15 +1042,246 @@ class BusStore:
 
     def active_jobs(self) -> list[dict[str, Any]]:
         with self.connection() as db:
-            return [dict(row) for row in db.execute("SELECT j.id,j.event_id,j.agent_id,j.root_id,j.state,j.created_at,j.started_at,j.finished_at,j.error,r.deadline AS root_deadline FROM jobs j JOIN roots r ON r.id=j.root_id WHERE j.state IN ('running','awaiting_native_reply') ORDER BY j.created_at")]
+            return [dict(row) for row in db.execute("SELECT j.id,j.event_id,j.agent_id,j.root_id,j.state,j.created_at,j.started_at,j.finished_at,j.error,j.execution_owner,j.native_input_reserved_at,r.deadline AS root_deadline FROM jobs j JOIN roots r ON r.id=j.root_id WHERE j.state IN ('running','awaiting_native_reply') ORDER BY j.created_at")]
 
-    def claim(self, agent_id: str) -> dict[str, Any] | None:
+    @staticmethod
+    def _mode_execution_owner(mode: str) -> str:
+        if mode in {"external", "external_attached"}:
+            return "manual_inbox"
+        if mode == "native_attached":
+            return "native_dispatch"
+        if mode in {"managed", "managed_new", "managed_resume"}:
+            return "managed_runtime"
+        raise BusError("Agent mode has no execution owner", 409)
+
+    @staticmethod
+    def _has_execution_evidence_in(db: sqlite3.Connection, job: sqlite3.Row) -> bool:
+        # Canonical old reservations must not be adopted from an agent's mode.
+        for table in ("avalokita_native_dispatch", "avalokita_hosted_attempts"):
+            if db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (table,)).fetchone():
+                if db.execute(f"SELECT 1 FROM {table} WHERE job_id=? LIMIT 1", (job["id"],)).fetchone():
+                    return True
+        for row in db.execute("SELECT metadata FROM events WHERE sender='system' AND kind='notice' AND root_id=?", (job["root_id"],)):
+            metadata = json.loads(row[0])
+            if metadata.get("job_id") == job["id"] and (metadata.get("state") == "awaiting_native_reply" or metadata.get("bridge_session_id")):
+                return True
+        return False
+
+    @classmethod
+    def _execution_route_in(cls, db: sqlite3.Connection, agent: sqlite3.Row, job: sqlite3.Row) -> tuple[str, bool]:
+        owner = job["execution_owner"]
+        if owner in EXECUTION_OWNERS:
+            return owner, False
+        if (owner is not None or job["native_completion_domain"] is not None or job["state"] != "queued" or job["started_at"] is not None
+                or job["finished_at"] is not None or job["native_input_reserved_at"] is not None
+                or cls._has_execution_evidence_in(db, job)):
+            return "legacy_unknown", False
+        route = cls._mode_execution_owner(agent["mode"])
+        return route, route == "manual_inbox"
+
+    @classmethod
+    def _native_completion_domain_in(cls, db: sqlite3.Connection, job: sqlite3.Row | dict[str, Any]) -> str:
+        """Read canonical provenance using only the caller's existing connection."""
+        domain = job["native_completion_domain"]
+        if job["execution_owner"] != "native_dispatch" or domain not in NATIVE_COMPLETION_DOMAINS:
+            raise BusError("Native work has no immutable completion authority", 409)
+        event = db.execute("SELECT * FROM events WHERE id=?", (job["event_id"],)).fetchone()
+        root = db.execute("SELECT * FROM roots WHERE id=?", (job["root_id"],)).fetchone()
+        human = db.execute("SELECT * FROM events WHERE id=?", (root["human_event_id"],)).fetchone() if root else None
+        if event is None or root is None or human is None or event["root_id"] != root["id"]:
+            raise BusError("Native completion has no exact canonical input", 409)
+        try:
+            metadata, human_metadata = json.loads(event["metadata"]), json.loads(human["metadata"])
+            if not isinstance(metadata, dict) or not isinstance(human_metadata, dict):
+                raise ValueError
+            direct_marker = False
+            for record in (metadata, human_metadata):
+                for key in ("avalokita_native_pending", "native_ipc_ids"):
+                    if key in record:
+                        if not isinstance(record[key], list) or any(not isinstance(value, str) for value in record[key]):
+                            raise ValueError
+                        direct_marker |= job["agent_id"] in record[key]
+            if "avalokita_peer_dispatch" in metadata:
+                if not isinstance(metadata["avalokita_peer_dispatch"], str) or not metadata["avalokita_peer_dispatch"]:
+                    raise ValueError
+                direct_marker = True
+        except (ValueError, TypeError):
+            raise BusError("Native completion provenance is malformed", 409) from None
+        for table, actor_column in (("avalokita_native_dispatch", "actor"), ("avalokita_native_peers", "recipient")):
+            if db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (table,)).fetchone():
+                try:
+                    rows = db.execute(f"SELECT * FROM {table} WHERE job_id=? OR (event_id=? AND {actor_column}=?)",
+                                      (job["id"], job["event_id"], job["agent_id"])).fetchall()
+                    for row in rows:
+                        if (row["job_id"] != job["id"] or row["event_id"] != job["event_id"]
+                                or row[actor_column] != job["agent_id"] or row["root_id"] != job["root_id"]):
+                            raise BusError("Canonical native dispatch contradicts this input", 409)
+                    direct_marker |= bool(rows)
+                except (sqlite3.Error, IndexError):
+                    raise BusError("Canonical native dispatch provenance is unavailable", 409) from None
+        origin = event["sender"] == "user" and metadata.get("native_origin") == job["agent_id"]
+        if (domain in {"broker_native", "native_origin"} and direct_marker
+                or domain == "native_origin" and (not origin or event["id"] != human["id"])
+                or domain != "native_origin" and origin):
+            raise BusError("Native completion domain contradicts the canonical input", 409)
+        return domain
+
+    @classmethod
+    def _claim_execution_in(cls, db: sqlite3.Connection, actor: str, job_id: str, *,
+                            execution_owner: str, allowed_states=("queued",),
+                            allow_existing: bool = False,
+                            native_completion_domain: str | None = None) -> dict[str, Any]:
+        if not db.in_transaction:
+            raise BusError("Execution ownership requires the existing guarded writer", 409)
+        if execution_owner not in EXECUTION_OWNERS:
+            raise BusError("Invalid execution owner", 409)
+        if (execution_owner == "native_dispatch" and native_completion_domain not in NATIVE_COMPLETION_DOMAINS
+                or execution_owner != "native_dispatch" and native_completion_domain is not None):
+            raise BusError("Execution owner requires its exact native completion domain", 409)
+        job = db.execute("SELECT * FROM jobs WHERE id=?", (job_id,)).fetchone()
+        agent = db.execute("SELECT * FROM agents WHERE id=?", (actor,)).fetchone()
+        if job is None or agent is None or job["agent_id"] != actor or job["state"] not in allowed_states:
+            raise BusError("Execution ownership no longer matches this work", 409)
+        if job["native_input_reserved_at"] is not None:
+            raise BusError("Native input reservation is already consumed", 409)
+        if job["execution_owner"] is not None:
+            if allow_existing and job["execution_owner"] == execution_owner:
+                if job["native_completion_domain"] != native_completion_domain:
+                    raise BusError("Existing completion authority cannot be adopted or changed", 409)
+                if execution_owner == "native_dispatch":
+                    cls._native_completion_domain_in(db, job)
+                return dict(job)
+            raise BusError("Work already has an execution owner", 409)
+        route, _ = cls._execution_route_in(db, agent, job)
+        if route == "legacy_unknown":
+            raise BusError("Legacy work ownership is unknown and cannot be adopted", 409)
+        compatible = cls._mode_execution_owner(agent["mode"]) == execution_owner
+        if execution_owner == "native_dispatch" and agent["mode"] == "external_attached":
+            # Only an existing authenticated direct-native admission calls here.
+            compatible = True
+        if not compatible:
+            raise BusError("Execution owner does not match the current agent mode", 409)
+        if execution_owner == "native_dispatch":
+            cls._native_completion_domain_in(db, {**dict(job), "execution_owner": execution_owner,
+                                                  "native_completion_domain": native_completion_domain})
+        changed = db.execute("UPDATE jobs SET execution_owner=?,native_completion_domain=? WHERE id=? AND execution_owner IS NULL AND native_completion_domain IS NULL AND started_at IS NULL AND finished_at IS NULL AND native_input_reserved_at IS NULL",
+                             (execution_owner, native_completion_domain, job_id)).rowcount
+        if changed != 1:
+            raise BusError("Execution ownership changed before its grant", 409)
+        return {**dict(job), "execution_owner": execution_owner, "native_completion_domain": native_completion_domain}
+
+    @classmethod
+    def _validate_execution_in(cls, db: sqlite3.Connection, actor: str, job_id: str,
+                               event_id: str, root_id: str, *, execution_owner: str,
+                               native_session_id: Any = _UNSET,
+                               generation: int | None = None) -> dict[str, Any]:
+        job = db.execute("SELECT * FROM jobs WHERE id=?", (job_id,)).fetchone()
+        agent = db.execute("SELECT * FROM agents WHERE id=?", (actor,)).fetchone()
+        root = db.execute("SELECT * FROM roots WHERE id=?", (root_id,)).fetchone()
+        compatible_modes = {"manual_inbox": {"external", "external_attached"},
+                            "native_dispatch": {"external_attached", "native_attached"},
+                            "managed_runtime": {"managed", "managed_new", "managed_resume"}}
+        if (execution_owner not in EXECUTION_OWNERS or job is None or agent is None or root is None
+                or job["agent_id"] != actor or job["event_id"] != event_id or job["root_id"] != root_id
+                or job["execution_owner"] != execution_owner or job["state"] not in {"running", "awaiting_native_reply"}
+                or type(job["generation"]) is not int or job["generation"] != agent["generation"]
+                or agent["active_root"] != root_id or agent["state"] not in {"starting", "running", "awaiting_native_reply"}
+                or agent["mode"] not in compatible_modes[execution_owner]
+                or native_session_id is not _UNSET and agent["native_session_id"] != native_session_id
+                or generation is not None and agent["generation"] != generation
+                or db.execute("SELECT value FROM config WHERE key='paused'").fetchone()[0] == "true"
+                or execution_owner == "native_dispatch" and cls._auto_flags(db)["suspended"]
+                or not 0 < root["used"] <= root["budget"]
+                or not math.isfinite(root["deadline"]) or root["deadline"] <= time.time()):
+            raise BusError("Execution no longer owns an active, unpaused input", 409)
+        return dict(job)
+
+    def validate_execution(self, actor: str, job_id: str, event_id: str, root_id: str, *,
+                           execution_owner: str, native_session_id: Any = _UNSET,
+                           generation: int | None = None) -> dict[str, Any]:
+        with self.connection() as db:
+            db.execute("BEGIN")
+            return self._validate_execution_in(db, actor, job_id, event_id, root_id,
+                                               execution_owner=execution_owner,
+                                               native_session_id=native_session_id, generation=generation)
+
+    @classmethod
+    def _validate_native_input_in(cls, db: sqlite3.Connection, actor: str, job_id: str,
+                                  event_id: str, root_id: str, native_session_id: str, *,
+                                  require_reserved: bool, generation: int | None = None,
+                                  provider: str | None = None,
+                                  native_address: Any = _UNSET,
+                                  native_completion_domain: str = "broker_native") -> dict[str, Any]:
+        job = cls._validate_execution_in(db, actor, job_id, event_id, root_id,
+                                         execution_owner="native_dispatch",
+                                         native_session_id=native_session_id, generation=generation)
+        if (native_completion_domain not in {"broker_native", "avalokita_direct"}
+                or cls._native_completion_domain_in(db, job) != native_completion_domain):
+            raise BusError("Native input belongs to another completion domain", 409)
+        agent = db.execute("SELECT * FROM agents WHERE id=?", (actor,)).fetchone()
+        if (not native_session_id or agent["mode"] not in {"external_attached", "native_attached"}
+                or agent["state"] not in {"running", "awaiting_native_reply"}
+                or provider is not None and agent["provider"] != provider
+                or native_address is not _UNSET and agent["native_address"] != native_address
+                or (job["native_input_reserved_at"] is not None) != require_reserved):
+            raise BusError("Native input reservation or binding changed", 409)
+        if require_reserved and (not isinstance(job["native_input_reserved_at"], (int, float))
+                                 or not math.isfinite(job["native_input_reserved_at"])
+                                 or job["native_input_reserved_at"] <= 0):
+            raise BusError("Native input reservation is invalid", 409)
+        return job
+
+    @classmethod
+    def _reserve_native_input_in(cls, db: sqlite3.Connection, actor: str, job_id: str,
+                                 event_id: str, root_id: str, native_session_id: str, *,
+                                 generation: int | None = None, provider: str | None = None,
+                                 native_address: Any = _UNSET,
+                                 native_completion_domain: str = "broker_native") -> dict[str, Any]:
+        if not db.in_transaction:
+            raise BusError("Native input reservation requires the existing guarded writer", 409)
+        cls._validate_native_input_in(db, actor, job_id, event_id, root_id, native_session_id,
+                                      require_reserved=False, generation=generation,
+                                      provider=provider, native_address=native_address,
+                                      native_completion_domain=native_completion_domain)
+        now = time.time()
+        changed = db.execute("UPDATE jobs SET native_input_reserved_at=? WHERE id=? AND execution_owner='native_dispatch' AND native_input_reserved_at IS NULL",
+                             (now, job_id)).rowcount
+        if changed != 1:
+            raise BusError("Native input reservation is already consumed", 409)
+        return {"job_id": job_id, "event_id": event_id, "root_id": root_id,
+                "execution_owner": "native_dispatch", "native_input_reserved_at": now}
+
+    def reserve_native_input(self, actor: str, job_id: str, event_id: str, root_id: str,
+                             native_session_id: str, *, generation: int | None = None,
+                             provider: str | None = None,
+                             native_address: Any = _UNSET) -> dict[str, Any]:
         with self.connection() as db:
             db.execute("BEGIN IMMEDIATE")
+            return self._reserve_native_input_in(db, actor, job_id, event_id, root_id,
+                                                 native_session_id, generation=generation,
+                                                 provider=provider, native_address=native_address)
+
+    def claim(self, agent_id: str, *, expected=None,
+              execution_owner: str | None = None) -> dict[str, Any] | None:
+        # An owned caller may hold its outer authority writers and select one
+        # exact candidate. The validator only rechecks that caller's Bus read set;
+        # it must not acquire another writer or perform external I/O.
+        if expected is not None and not expected.get("job_id"):
+            return None
+        with self.connection() as db:
+            db.execute("BEGIN IMMEDIATE")
+            if expected is not None and not expected["validate"](db):
+                return None
             if db.execute("SELECT value FROM config WHERE key='paused'").fetchone()[0] == "true":
                 return None
             agent = db.execute("SELECT * FROM agents WHERE id=?", (agent_id,)).fetchone()
             if agent is None or agent["state"] in {"stopped", "paused", "needs_human", "starting", "unavailable", "awaiting_native_reply", "waiting_for_user"}:
+                return None
+            derived_owner = self._mode_execution_owner(agent["mode"])
+            if execution_owner is not None and execution_owner != derived_owner:
+                raise BusError("Execution owner does not match the current agent mode", 409)
+            selected_owner = execution_owner or derived_owner
+            if selected_owner == "native_dispatch" and self._auto_flags(db)["suspended"]:
                 return None
             if agent["provider"] == "codex" and agent["mode"] == "native_attached":
                 auto = self._auto_flags(db)
@@ -976,56 +1289,105 @@ class BusStore:
                     return None
             if db.execute("SELECT 1 FROM jobs WHERE agent_id=? AND state IN ('running','awaiting_native_reply','waiting_user')", (agent_id,)).fetchone():
                 return None
-            while True:
-                job = db.execute("SELECT * FROM jobs WHERE agent_id=? AND state='queued' ORDER BY priority DESC,created_at,id LIMIT 1", (agent_id,)).fetchone()
-                if job is None:
-                    return None
+            candidates = (db.execute("SELECT * FROM jobs WHERE agent_id=? AND id=? AND state=?",
+                                     (agent_id, expected["job_id"], expected["state"])).fetchall()
+                          if expected is not None else
+                          db.execute("SELECT * FROM jobs WHERE agent_id=? AND state='queued' ORDER BY priority DESC,created_at,id", (agent_id,)).fetchall())
+            for job in candidates:
+                route, _ = self._execution_route_in(db, agent, job)
+                if route == "legacy_unknown" or job["execution_owner"] is not None:
+                    continue
                 root = db.execute("SELECT * FROM roots WHERE id=?", (job["root_id"],)).fetchone()
                 if root is None or root["used"] >= root["budget"] or root["deadline"] <= time.time():
                     reason = "Human root automatic-turn budget exhausted or deadline expired"
                     db.execute("UPDATE jobs SET state='needs_human',error=?,finished_at=? WHERE id=?", (reason, time.time(), job["id"]))
                     self._insert_event(db, "notice", "system", "user", reason, job["root_id"], {"job_id": job["id"], "agent_id": agent_id})
+                    if expected is not None:
+                        return None
                     continue
                 now = time.time()
+                granted = self._claim_execution_in(db, agent_id, job["id"], execution_owner=selected_owner,
+                                                    allowed_states=(expected["state"],) if expected else ("queued",),
+                                                    native_completion_domain="broker_native" if selected_owner == "native_dispatch" else None)
                 db.execute("UPDATE roots SET used=used+1 WHERE id=?", (root["id"],))
                 db.execute("UPDATE jobs SET state='running',started_at=?,generation=? WHERE id=?", (now, agent["generation"], job["id"]))
                 db.execute("UPDATE agents SET state='running',active_root=?,updated_at=? WHERE id=?", (root["id"], now, agent_id))
-                result = dict(job)
-                result["state"] = "running"
+                result = {**granted, "state": "running", "started_at": now, "generation": agent["generation"]}
                 result["event"] = self._event(db.execute("SELECT * FROM events WHERE id=?", (job["event_id"],)).fetchone())
                 result["remaining_turns"] = root["budget"] - root["used"] - 1
                 return result
+        return None
+
+    def _finish_in(self, db: sqlite3.Connection, job_id: str, state: str, *,
+                   text: str = "", error: str | None = None,
+                   native_session_id: str | None = None,
+                   expected_native: tuple[str, str, str] | None = None,
+                   expected_execution_owner: str | None = None) -> str:
+        if state not in {"completed", "failed", "interrupted", "needs_human"}:
+            raise BusError("Invalid job terminal state")
+        if not db.in_transaction:
+            raise BusError("Job completion requires the existing guarded writer", 409)
+        job = db.execute("SELECT * FROM jobs WHERE id=?", (job_id,)).fetchone()
+        if job is None or job["state"] not in {"running", "awaiting_native_reply"}:
+            raise BusError("Job is not running", 409)
+        execution_owner = job["execution_owner"]
+        if execution_owner not in EXECUTION_OWNERS or expected_execution_owner is not None and execution_owner != expected_execution_owner:
+            raise BusError("Job completion has no matching execution owner", 409)
+        if execution_owner != "native_dispatch" and job["native_completion_domain"] is not None:
+            raise BusError("Non-native work has a contradictory completion domain", 409)
+        owner = db.execute("SELECT * FROM agents WHERE id=?", (job["agent_id"],)).fetchone()
+        if owner is None or owner["active_root"] != job["root_id"]:
+            raise BusError("Job completion no longer owns the current input", 409)
+        if type(job["generation"]) is not int or job["generation"] != owner["generation"]:
+            raise BusError("Job completion no longer owns the original generation", 409)
+        if expected_native:
+            actor, expected_event, expected_session = expected_native
+            if job["agent_id"] != actor or job["event_id"] != expected_event or owner["native_session_id"] != expected_session:
+                raise BusError("Native result no longer owns this active input", 409)
+            if owner["state"] in {"paused", "stopped"} or db.execute("SELECT value FROM config WHERE key='paused'").fetchone()[0] == "true":
+                raise BusError("Human control paused or stopped this native input", 409)
+        if state == "completed":
+            if execution_owner == "native_dispatch":
+                domain = self._native_completion_domain_in(db, job)
+                if domain == "avalokita_direct":
+                    raise BusError("Direct native success requires the owned trusted completion kernel", 409)
+                if native_session_id is not None and native_session_id != owner["native_session_id"]:
+                    raise BusError("Native completion cannot replace the original binding", 409)
+                self._validate_execution_in(db, job["agent_id"], job_id, job["event_id"], job["root_id"],
+                                            execution_owner=execution_owner, native_session_id=owner["native_session_id"])
+            if execution_owner == "native_dispatch" and (job["state"] != "awaiting_native_reply" or not expected_native
+                    or not isinstance(job["native_input_reserved_at"], (int, float))
+                    or not math.isfinite(job["native_input_reserved_at"]) or job["native_input_reserved_at"] <= 0):
+                raise BusError("Native completion has no consumed input reservation", 409)
+            if execution_owner == "manual_inbox" and (job["state"] != "running" or owner["state"] != "running"
+                    or owner["mode"] not in {"external", "external_attached"}
+                    or db.execute("SELECT value FROM config WHERE key='paused'").fetchone()[0] == "true"):
+                raise BusError("Manual completion does not own a running inbox input", 409)
+        now = time.time()
+        db.execute("UPDATE jobs SET state=?,finished_at=?,error=? WHERE id=?", (state, now, error, job_id))
+        current = owner["state"]
+        agent_state = current if current in {"paused", "stopped"} else "idle" if state == "completed" else "needs_human"
+        db.execute("UPDATE agents SET state=?,active_root=NULL,error=?,native_session_id=COALESCE(?,native_session_id),updated_at=? WHERE id=? AND active_root=? AND generation=? AND native_session_id IS ?",
+                   (agent_state, error, native_session_id, now, job["agent_id"], job["root_id"], owner["generation"], owner["native_session_id"]))
+        if expected_native and state == "completed" and execution_owner == "native_dispatch" and domain == "broker_native":
+            db.execute("UPDATE agents SET channel_verified=1 WHERE id=? AND active_root IS NULL AND generation=? AND native_session_id IS ?",
+                       (job["agent_id"], owner["generation"], native_session_id or owner["native_session_id"]))
+        if text:
+            self._insert_event(db, "result", job["agent_id"], "user", text[:MAX_BODY], job["root_id"], {"job_id": job_id, "state": state})
+        if error:
+            self._insert_event(db, "notice", "system", "user", error, job["root_id"], {"job_id": job_id, "agent_id": job["agent_id"], "state": state})
+        return job["agent_id"]
 
     def finish(self, job_id: str, state: str, *, text: str = "", error: str | None = None,
                native_session_id: str | None = None,
-               expected_native: tuple[str, str, str] | None = None) -> None:
-        if state not in {"completed", "failed", "interrupted", "needs_human"}:
-            raise BusError("Invalid job terminal state")
+               expected_native: tuple[str, str, str] | None = None,
+               expected_execution_owner: str | None = None) -> None:
         with self.connection() as db:
             db.execute("BEGIN IMMEDIATE")
-            job = db.execute("SELECT * FROM jobs WHERE id=?", (job_id,)).fetchone()
-            if job is None or job["state"] not in {"running", "awaiting_native_reply"}:
-                raise BusError("Job is not running", 409)
-            if expected_native:
-                actor, expected_event, expected_session = expected_native
-                owner = db.execute("SELECT * FROM agents WHERE id=?", (actor,)).fetchone()
-                if owner is None or job["agent_id"] != actor or job["event_id"] != expected_event or owner["active_root"] != job["root_id"] or owner["native_session_id"] != expected_session:
-                    raise BusError("Native result no longer owns this active input", 409)
-                if owner["state"] in {"paused", "stopped"} or db.execute("SELECT value FROM config WHERE key='paused'").fetchone()[0] == "true":
-                    raise BusError("Human control paused or stopped this native input", 409)
-            now = time.time()
-            db.execute("UPDATE jobs SET state=?,finished_at=?,error=? WHERE id=?", (state, now, error, job_id))
-            current = db.execute("SELECT state FROM agents WHERE id=?", (job["agent_id"],)).fetchone()[0]
-            agent_state = current if current in {"paused", "stopped"} else "idle" if state == "completed" else "needs_human"
-            db.execute("UPDATE agents SET state=?,active_root=NULL,error=?,native_session_id=COALESCE(?,native_session_id),updated_at=? WHERE id=?",
-                       (agent_state, error, native_session_id, now, job["agent_id"]))
-            if expected_native and state == "completed":
-                db.execute("UPDATE agents SET channel_verified=1 WHERE id=?", (job["agent_id"],))
-            if text:
-                self._insert_event(db, "result", job["agent_id"], "user", text[:MAX_BODY], job["root_id"], {"job_id": job_id, "state": state})
-            if error:
-                self._insert_event(db, "notice", "system", "user", error, job["root_id"], {"job_id": job_id, "agent_id": job["agent_id"], "state": state})
-        self._manifest(job["agent_id"])
+            actor = self._finish_in(db, job_id, state, text=text, error=error,
+                                    native_session_id=native_session_id, expected_native=expected_native,
+                                    expected_execution_owner=expected_execution_owner)
+        self._manifest(actor)
 
     def await_native(self, job_id: str, receipt: str, bridge_session_id: str | None = None) -> None:
         with self.connection() as db:
@@ -1037,10 +1399,16 @@ class BusStore:
                 job = None
             if job is None:
                 raise BusError("Native dispatch job is not running", 409)
-            owner = db.execute("SELECT state,active_root FROM agents WHERE id=?", (job["agent_id"],)).fetchone()
+            if job["execution_owner"] not in EXECUTION_OWNERS:
+                raise BusError("Native dispatch has no known execution owner", 409)
+            if job["execution_owner"] == "manual_inbox":
+                raise BusError("Manual inbox work is not an automatic native dispatch", 409)
+            owner = db.execute("SELECT state,active_root,generation FROM agents WHERE id=?", (job["agent_id"],)).fetchone()
             paused = db.execute("SELECT value FROM config WHERE key='paused'").fetchone()[0] == "true"
             if paused or owner is None or owner["state"] not in {"running", "awaiting_native_reply"} or owner["active_root"] != job["root_id"]:
                 raise BusError("Native delivery no longer owns an active, unpaused input", 409)
+            if type(job["generation"]) is not int or job["generation"] != owner["generation"]:
+                raise BusError("Native receipt no longer owns the original generation", 409)
             db.execute("UPDATE jobs SET state='awaiting_native_reply' WHERE id=?", (job_id,))
             db.execute("UPDATE agents SET state='awaiting_native_reply',updated_at=? WHERE id=?", (time.time(), job["agent_id"]))
             self._insert_event(db, "notice", "system", "user", receipt[:4000], job["root_id"],
@@ -1051,17 +1419,41 @@ class BusStore:
     def native_result(self, actor: str, native_session_id: str, text: str,
                       job_id: str | None = None, event_id: str | None = None,
                       requires_review_if_uncorrelated: bool = False) -> dict[str, Any]:
-        with self.connection() as db:
-            db.execute("BEGIN IMMEDIATE")
-            current = db.execute("SELECT state FROM agents WHERE id=?", (actor,)).fetchone()
-            paused = db.execute("SELECT value FROM config WHERE key='paused'").fetchone()[0] == "true"
-            if current is None or current["state"] in {"paused", "stopped"} or paused:
-                raise BusError("Human control paused or stopped this native input", 409)
-        agent = self.agent(actor)
-        if not native_session_id or native_session_id != agent["native_session_id"] or agent["mode"] not in {"external_attached", "native_attached"}:
-            raise BusError("Native result must match the authenticated attached conversation", 403)
         if not isinstance(text, str) or not text or len(text.encode("utf-8")) > MAX_BODY:
             raise BusError("Native result must contain 1 byte to 64 KiB of text")
+        if ((job_id is not None or event_id is not None)
+                and (not isinstance(job_id, str) or not job_id
+                     or not isinstance(event_id, str) or not event_id)):
+            raise BusError("Native result needs two nonempty string input identifiers")
+        with self.connection() as db:
+            db.execute("BEGIN")
+            agent = db.execute("SELECT * FROM agents WHERE id=?", (actor,)).fetchone()
+            if (agent is None or not native_session_id or native_session_id != agent["native_session_id"]
+                    or agent["mode"] not in {"external_attached", "native_attached"}):
+                raise BusError("Native result must match the authenticated attached conversation", 403)
+            job = db.execute("SELECT * FROM jobs WHERE id=?", (job_id,)).fetchone() if job_id and event_id else None
+            domain = None
+            if job_id and event_id:
+                if job is None or job["agent_id"] != actor or job["event_id"] != event_id:
+                    raise BusError("Native result correlation does not match its canonical input", 409)
+                if job["execution_owner"] == "native_dispatch":
+                    domain = self._native_completion_domain_in(db, job)
+                elif job["native_completion_domain"] is not None:
+                    raise BusError("Native result has a contradictory completion authority", 409)
+            if domain != "avalokita_direct":
+                paused = db.execute("SELECT value FROM config WHERE key='paused'").fetchone()[0] == "true"
+                if agent["state"] in {"paused", "stopped"} or paused:
+                    raise BusError("Human control paused or stopped this native input", 409)
+        if domain == "avalokita_direct":
+            # No connection or canonical writer survives into the slow trusted
+            # proof reader. The kernel must revalidate its final exact read set.
+            self.guard_workspace()
+            with self._native_completion_lock:
+                registration = self._native_completion_registration
+                if registration is None:
+                    raise BusError("Direct native completion has no owned trusted handler", 409)
+                return registration[1](actor=actor, native_session_id=native_session_id,
+                                       text=text, job_id=job_id, event_id=event_id)
         if not (job_id and event_id):
             result = self.send(actor, "all", text, "result")
             if requires_review_if_uncorrelated:
@@ -1073,12 +1465,42 @@ class BusStore:
                                 expected_native=(actor, waiting["event_id"], native_session_id))
                     return {"completed": False, "needs_human": True, "reason": reason, "job_id": waiting["id"], **result}
             return {"completed": False, "reason": "No exact input correlation; recorded a passive result only", **result}
-        with self.connection() as db:
-            job = db.execute("SELECT * FROM jobs WHERE id=?", (job_id,)).fetchone()
-        if job is None or job["agent_id"] != actor or job["event_id"] != event_id or job["root_id"] != agent["active_root"] or job["state"] != "awaiting_native_reply":
+        if (job is None or job["state"] not in {"running", "awaiting_native_reply", "completed"}
+                or job["state"] != "completed" and job["root_id"] != agent["active_root"]):
             raise BusError("Native result correlation does not match an active owned input", 409)
-        self.finish(job_id, "completed", text=text, native_session_id=native_session_id,
-                    expected_native=(actor, event_id, native_session_id))
+        with self.connection() as db:
+            db.execute("BEGIN IMMEDIATE")
+            agent = db.execute("SELECT * FROM agents WHERE id=?", (actor,)).fetchone()
+            job = db.execute("SELECT * FROM jobs WHERE id=?", (job_id,)).fetchone()
+            if (agent is None or agent["native_session_id"] != native_session_id
+                    or agent["mode"] not in {"external_attached", "native_attached"}
+                    or job is None or job["agent_id"] != actor or job["event_id"] != event_id):
+                raise BusError("Native result no longer matches the authenticated input", 409)
+            if job["execution_owner"] == "native_dispatch":
+                if self._native_completion_domain_in(db, job) == "avalokita_direct":
+                    raise BusError("Direct native success requires the owned trusted completion kernel", 409)
+            elif job["native_completion_domain"] is not None:
+                raise BusError("Native result has a contradictory completion authority", 409)
+            if (agent["state"] in {"paused", "stopped"}
+                    or db.execute("SELECT value FROM config WHERE key='paused'").fetchone()[0] == "true"
+                    or job["execution_owner"] == "native_dispatch" and self._auto_flags(db)["suspended"]):
+                raise BusError("Human control paused or stopped this native input", 409)
+            if job["state"] == "completed":
+                results = db.execute("SELECT body FROM events WHERE sender=? AND recipient='user' AND kind='result' AND root_id=? "
+                    "AND json_extract(metadata,'$.job_id')=? AND json_extract(metadata,'$.state')='completed'",
+                    (actor, job["root_id"], job_id)).fetchall()
+                if (job["execution_owner"] not in {"native_dispatch", "manual_inbox"}
+                        or type(job["generation"]) is not int or job["generation"] != agent["generation"]
+                        or agent["active_root"] is not None or len(results) != 1 or results[0][0] != text):
+                    raise BusError("Native result conflicts with the selected completed input", 409)
+                return {"completed": True, "job_id": job_id, "event_id": event_id,
+                        "root_id": job["root_id"], "duplicate_suppressed": True}
+            if job["root_id"] != agent["active_root"] or job["state"] not in {"running", "awaiting_native_reply"}:
+                raise BusError("Native result correlation does not match an active owned input", 409)
+            self._finish_in(db, job_id, "completed", text=text, native_session_id=native_session_id,
+                            expected_native=(actor, event_id, native_session_id),
+                            expected_execution_owner=job["execution_owner"])
+        self._manifest(actor)
         return {"completed": True, "job_id": job_id, "event_id": event_id, "root_id": job["root_id"]}
 
     def recover(self) -> int:
@@ -1097,23 +1519,51 @@ class BusStore:
         return len(rows)
 
     def external_inbox(self, actor: str, after: int = 0, acknowledgements: list[str] | None = None,
-                       *, claim_work: bool = True) -> dict[str, Any]:
+                       *, claim_work: bool = False) -> dict[str, Any]:
         if not isinstance(claim_work, bool):
             raise BusError("Inbox claim setting must be boolean")
-        agent = self.agent(actor)
-        if agent["mode"] not in {"external", "external_attached", "native_attached"}:
-            raise BusError("Managed agent inbox is dispatched by the supervisor", 409)
-        for job_id in acknowledgements or []:
-            with self.connection() as db:
-                row = db.execute("SELECT agent_id,state FROM jobs WHERE id=?", (job_id,)).fetchone()
-            if row is None or row["agent_id"] != actor:
-                raise BusError("Cannot acknowledge another agent's work", 403)
-            if row["state"] == "running":
-                self.finish(job_id, "completed")
-        job = self.claim(actor) if claim_work else None
+        if not isinstance(after, int) or isinstance(after, bool) or after < 0:
+            raise BusError("Invalid event cursor")
+        if acknowledgements is not None and (not isinstance(acknowledgements, list) or any(not isinstance(job_id, str) for job_id in acknowledgements)):
+            raise BusError("Invalid inbox acknowledgements")
+        repeated_ack = False
+        completed = False
         with self.connection() as db:
-            rows = db.execute("SELECT e.* FROM events e JOIN jobs j ON j.event_id=e.id WHERE j.agent_id=? AND e.seq>? ORDER BY e.seq LIMIT 100", (actor, after)).fetchall()
-        return {"messages": [self._event(row) for row in rows], "jobs": [job] if job else []}
+            db.execute("BEGIN IMMEDIATE" if acknowledgements else "BEGIN")
+            agent = db.execute("SELECT * FROM agents WHERE id=?", (actor,)).fetchone()
+            if agent is None:
+                raise BusError("Unknown agent", 404)
+            if agent["mode"] not in {"external", "external_attached", "native_attached"}:
+                raise BusError("Managed agent inbox is dispatched by the supervisor", 409)
+            if claim_work and agent["mode"] == "native_attached":
+                raise BusError("Native automatic work cannot be received from the manual inbox", 409)
+            for job_id in dict.fromkeys(acknowledgements or []):
+                row = db.execute("SELECT * FROM jobs WHERE id=?", (job_id,)).fetchone()
+                if row is None or row["agent_id"] != actor:
+                    raise BusError("Cannot acknowledge another agent's work", 403)
+                if row["execution_owner"] != "manual_inbox":
+                    raise BusError("Inbox acknowledgement does not own this work", 409)
+                if row["state"] == "completed":
+                    repeated_ack = True
+                    continue
+                if (row["state"] != "running" or agent["mode"] not in {"external", "external_attached"}
+                        or agent["state"] not in {"running", "awaiting_native_reply"}
+                        or db.execute("SELECT value FROM config WHERE key='paused'").fetchone()[0] == "true"):
+                    raise BusError("Inbox acknowledgement no longer owns an active manual input", 409)
+                self._finish_in(db, job_id, "completed", expected_execution_owner="manual_inbox")
+                completed = True
+        if completed:
+            self._manifest(actor)
+        job = self.claim(actor, execution_owner="manual_inbox") if claim_work and not repeated_ack else None
+        if job:
+            job["can_execute"] = True
+        with self.connection() as db:
+            db.execute("BEGIN")
+            rows = db.execute("SELECT e.*,j.id AS job_id,j.state AS job_state,j.execution_owner,j.native_input_reserved_at FROM events e JOIN jobs j ON j.event_id=e.id WHERE j.agent_id=? AND e.seq>? ORDER BY e.seq LIMIT 100", (actor, after)).fetchall()
+            active = db.execute("SELECT id,state,execution_owner,native_input_reserved_at FROM jobs WHERE agent_id=? AND state IN ('running','awaiting_native_reply','waiting_user') ORDER BY created_at,id LIMIT 1", (actor,)).fetchone()
+        return {"messages": [self._event(row) for row in rows], "jobs": [job] if job else [],
+                "execution": {"state": active["state"], "execution_owner": active["execution_owner"],
+                              "native_input_reserved_at": active["native_input_reserved_at"], "can_execute": False} if active else None}
 
     def safe_source(self, source: str) -> Path:
         self.guard_workspace()

@@ -25,8 +25,7 @@ class FakeAdapter:
     prompts = []
     instance_count = 0
 
-    def __init__(self, provider, workspace, agent_id, token_file, on_event=None, *, subscription_only=False):
-        self.subscription_only = subscription_only
+    def __init__(self, provider, workspace, agent_id, token_file, on_event=None):
         self.id = agent_id
         self.on_event = on_event
         self.session_id = None
@@ -120,7 +119,7 @@ class DaemonTests(unittest.TestCase):
         self.assertEqual(self.request("/api/control", {"action": "pause"}, token=a["token"])[0], 403)
         self.assertEqual(self.request("/api/message", {"to": b["agent"]["id"], "body": "task", "kind": "task", "sender": "user"}, token=a["token"])[0], 409)
         human = self.request("/api/message", {"to": a["agent"]["id"], "body": "Work", "kind": "task"})[1]
-        self.request("/api/agent/inbox", {}, token=a["token"])
+        self.request("/api/agent/inbox", {"claim": True}, token=a["token"])
         code, delegated, _ = self.request("/api/message", {"to": b["agent"]["id"], "body": "Help", "kind": "task", "sender": "user", "root_id": "fake"}, token=a["token"])
         self.assertEqual(code, 200)
         self.assertEqual(delegated["event"]["sender"], a["agent"]["id"])
@@ -155,7 +154,6 @@ class DaemonTests(unittest.TestCase):
                 self.fail("Synthetic native job did not complete")
         native = self.server.store.agent(agent["id"])["native_session_id"]
         self.assertEqual(FakeAdapter.instance_count, 1)
-        self.assertTrue(self.server.supervisor._adapters[agent["id"]].subscription_only)
         self.assertEqual(FakeAdapter.starts, [None])
         self.assertEqual(len(FakeAdapter.prompts), 2)
         self.server.supervisor.restart(agent["id"])
@@ -263,6 +261,7 @@ class DaemonTests(unittest.TestCase):
         self.server.store.update_agent(agent_id, mode="native_attached")
         first = self.request("/api/message", {"to": agent_id, "body": "First input", "kind": "task"})[1]
         old = self.server.store.claim(agent_id)
+        self.server.store.reserve_native_input(agent_id, old["id"], old["event_id"], old["root_id"], "existing-native")
         self.server.store.await_native(old["id"], "Delivered")
         second = self.request("/api/message", {"to": agent_id, "body": "Second queued input", "kind": "task"})[1]
         question = self.request("/api/message", {"to": "user", "body": "Which option?", "kind": "question"}, token=native["token"])[1]["event"]
@@ -288,6 +287,7 @@ class DaemonTests(unittest.TestCase):
         self.assertEqual(late[0], 409)
         self.assertEqual(self.server.store.agent(agent_id)["active_root"], continuation["root_id"])
         self.server.store.await_native(old["id"], "Late delivery receipt")
+        self.server.store.reserve_native_input(agent_id, continuation["id"], continuation["event_id"], continuation["root_id"], "existing-native")
         self.server.store.await_native(continuation["id"], "Human answer delivered")
         done = self.request("/api/native/result", {"native_session_id": "existing-native", "last_assistant_message": "Finished after human answer", "job_id": continuation["id"], "event_id": continuation["event_id"]}, token=native["token"])[1]
         self.assertTrue(done["completed"])
@@ -302,8 +302,10 @@ class DaemonTests(unittest.TestCase):
                 native_id = "native-" + action
                 attached = self.request("/api/agent/register", {"provider": "claude", "native_session_id": native_id})[1]
                 agent_id = attached["agent"]["id"]
+                self.server.store.update_agent(agent_id, mode="native_attached")
                 self.server.store.send("user", agent_id, "Work", "task")
                 job = self.server.store.claim(agent_id)
+                self.server.store.reserve_native_input(agent_id, job["id"], job["event_id"], job["root_id"], native_id)
                 self.server.store.await_native(job["id"], "Delivered")
                 control = {"action": "pause" if action == "global" else action, "agent": "all" if action == "global" else agent_id}
                 self.request("/api/control", control)

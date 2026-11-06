@@ -28,6 +28,11 @@ state_path, input_path = Path(state_path), Path(input_path)
 session = 'native-session-001'
 memory = state_path.read_text() if state_path.exists() else ''
 turn = 0
+configs = [
+    {'id':'model','name':'Model','category':'model','type':'select','currentValue':'gemini-4-argon',
+     'options':[{'value':value,'name':value} for value in ('gemini-4-argon','gemini-3.8-flash')]},
+    {'id':'thought_level','name':'Thought level','category':'thought_level','type':'select','currentValue':'medium',
+     'options':[{'value':value,'name':value} for value in ('low','medium','high')]}]
 def emit(value):
     print(json.dumps(value), flush=True)
 def record(value):
@@ -46,6 +51,42 @@ for line in sys.stdin:
     value=json.loads(line)
     record(value)
     method=value.get('method')
+    if provider=='antigravity':
+        def reply(result):
+            emit({'jsonrpc':'2.0','id':value['id'],'result':result})
+        if method=='initialize':
+            reply({'protocolVersion':1,'agentCapabilities':{'loadSession':True}})
+        elif method in ('session/new','session/load'):
+            reply({'sessionId':session,'configOptions':configs,'models':{'currentModelId':'gemini-4-argon-medium',
+                'availableModels':[{'modelId':'gemini-4-argon-'+level,'name':level} for level in ('low','medium','high')]}})
+        elif method=='session/set_config_option':
+            for config in configs:
+                if config['id']==value['params']['configId']: config['currentValue']=value['params']['value']
+            reply({'configOptions':configs})
+        elif method=='session/prompt':
+            prompt=value['params']['prompt'][0]['text']
+            if prompt=='timeout':
+                time.sleep(10)
+                continue
+            if prompt.startswith('remember:'):
+                memory=prompt.split(':',1)[1]
+                state_path.write_text(memory)
+            text='remembered' if prompt.startswith('remember:') else memory or 'ready'
+            if 'needs-permission' in prompt:
+                emit({'jsonrpc':'2.0','id':9001,'method':'session/request_permission','params':{'sessionId':session,
+                    'toolCall':{'toolCallId':'actual-tool','title':'Native action','kind':'execute',
+                        'rawInput':{'command':'python -V','cwd':str(state_path.parent)}},
+                    'options':[{'optionId':'actual-once','kind':'allow_once','name':'Once'},
+                               {'optionId':'actual-deny','kind':'reject_once','name':'Deny'}]}})
+                line=sys.stdin.readline()
+                if not line: break
+                record(json.loads(line))
+            emit({'jsonrpc':'2.0','method':'session/update','params':{'sessionId':session,
+                'update':{'sessionUpdate':'agent_thought_chunk','content':{'type':'text','text':'PRIVATE_THOUGHT'}}}})
+            emit({'jsonrpc':'2.0','method':'session/update','params':{'sessionId':session,
+                'update':{'sessionUpdate':'agent_message_chunk','content':{'type':'text','text':text}}}})
+            reply({'stopReason':'refusal' if prompt=='fail' else 'end_turn'})
+        continue
     if method=='initialize':
         emit({'id':value['id'],'result':{'userAgent':'fake'}})
         continue
@@ -129,12 +170,99 @@ def wire(tmp_path, monkeypatch):
     inputs = tmp_path / "native-input.jsonl"
     monkeypatch.setattr(adapters, "discover_native_sessions", lambda provider: [])
 
-    def make(provider="codex", events=None, **options):
-        adapter = NativeAdapter(provider, tmp_path, "test-agent", tmp_path / "agent.token", events, **options)
+    def make(provider="codex", events=None, *, agent_id="test-agent", token_file=None, **options):
+        adapter = NativeAdapter(provider, tmp_path, agent_id, token_file or tmp_path / "agent.token", events, **options)
+        if provider == "antigravity":
+            adapter._agy_model = "gemini-4-argon-high"
         monkeypatch.setattr(adapter, "_command", lambda resume: [sys.executable, str(script), provider, str(state), str(inputs), resume or ""])
         return adapter
 
     return make, inputs
+
+
+@pytest.mark.parametrize("mode", ["managed_new", "managed_resume"])
+def test_actual_sdk_agy_same_session_warm_and_restart(wire, tmp_path, mode):
+    from store import BusStore
+    from supervisor import Supervisor
+    make, inputs = wire
+    store = BusStore(tmp_path)
+    resume = "native-session-001" if mode == "managed_resume" else None
+    actor, _ = store.register("antigravity", "Exact SDK owner", mode=mode, native_session_id=resume)
+    adapters_used, processes = [], []
+    def factory(provider, workspace, agent, token_file, **options):
+        adapter = make(provider, options.pop("on_event"), agent_id=agent, token_file=token_file, **options)
+        adapters_used.append(adapter)
+        return adapter
+    supervisor = Supervisor(store, [], adapter_factory=factory)
+    try:
+        generations = []
+        for number in range(3):
+            if number == 2:
+                supervisor.restart(actor["id"])
+            store.send("user", actor["id"], "One synthetic SDK input " + str(number), "task", budget=1)
+            job = store.claim(actor["id"], execution_owner="managed_runtime")
+            supervisor._run(actor["id"], job)
+            with store.connection() as db:
+                current = db.execute("SELECT state,generation FROM jobs WHERE id=?", (job["id"],)).fetchone()
+            assert current[0] == "completed"
+            generations.append(current[1])
+            assert store.agent(actor["id"])["native_session_id"] == "native-session-001"
+            assert adapters_used[-1]._process is None  # SDK owns the only process/readers.
+            process = adapters_used[-1]._acp._process
+            if process not in processes:
+                processes.append(process)
+        assert len(adapters_used) == len(processes) == 2 and generations == [1, 1, 2]
+        recorded = [json.loads(line) for line in inputs.read_text().splitlines()]
+        assert len([row for row in recorded if row.get("method") == "session/prompt"]) == 3
+        loaded = [row["params"]["sessionId"] for row in recorded if row.get("method") == "session/load"]
+        assert loaded == ["native-session-001"] * (2 if resume else 1)
+    finally:
+        supervisor.close()
+    assert all(process.returncode == 0 for process in processes)
+
+
+def test_actual_hosted_acp_approval_completes_without_synthetic_turn_id(wire, tmp_path):
+    from store import BusStore
+    from supervisor import Supervisor
+    make, inputs = wire
+    store = BusStore(tmp_path)
+    supervisor = Supervisor(store, [], hosted_execution_ready=lambda: True)
+    configured = supervisor.hosted.configure(["antigravity"], [{"provider": "antigravity", "installed": True, "managed_supported": True}])
+    actor = configured["sessions"][0]["agent_id"]
+    cards, processes = [], []
+    def factory(provider, workspace, agent, token_file, **options):
+        original = options.pop("on_approval")
+        adapter = make(provider, options.pop("on_event"), agent_id=agent, token_file=token_file, **options)
+        def approve(view):
+            original(view)
+            card = supervisor.hosted_state()["approvals"][0]
+            cards.append(card)
+            assert card["can_approve"] and card["details"]["tool_call"]["kind"] == "execute"
+            assert "PRIVATE_" not in json.dumps(card)
+            supervisor.hosted.reply(actor, card["approval_id"], {"decision": "accept"}, adapter)
+        adapter.on_approval = approve
+        return adapter
+    supervisor.adapter_factory = factory
+    try:
+        store.send("user", actor, "needs-permission", "task", budget=1)
+        job = store.claim(actor, execution_owner="managed_runtime")
+        supervisor._run(actor, job)
+        with store.connection() as db:
+            current = db.execute("SELECT state FROM jobs WHERE id=?", (job["id"],)).fetchone()[0]
+            attempt = db.execute("SELECT state,native_turn_id FROM avalokita_hosted_attempts WHERE job_id=?", (job["id"],)).fetchone()
+        assert current == attempt[0] == "completed" and attempt[1] is None
+        assert store.agent(actor)["native_session_id"] == "native-session-001" and store.agent(actor)["active_root"] is None
+        assert len(cards) == 1
+        adapter = supervisor._adapters[actor]
+        assert adapter._process is None
+        processes.append(adapter._acp._process)
+        recorded = [json.loads(line) for line in inputs.read_text().splitlines()]
+        assert len([row for row in recorded if row.get("method") == "session/prompt"]) == 1
+        assert [row for row in recorded if row.get("id") == 9001] == [{"jsonrpc": "2.0", "id": 9001,
+            "result": {"outcome": {"outcome": "selected", "optionId": "actual-once"}}}]
+    finally:
+        supervisor.close()
+    assert all(process.returncode == 0 for process in processes)
 
 
 @pytest.mark.parametrize("provider", ["codex", "claude", "antigravity"])
@@ -152,12 +280,13 @@ def test_two_turns_keep_native_process_context_and_idle_stdin(wire, provider):
         assert adapter.turn("remember:orange").success
         second = adapter.turn("what did I say?")
         assert second.success and second.text == "orange"
+        assert second.reason_code is None
         assert adapter.pid == first_pid
         assert second.session_id == "native-session-001"
         assert "PRIVATE_THOUGHT" not in second.text
         assert [event["session_id"] for event in events if event["type"] == "session"] == ["native-session-001"]
         recorded = [json.loads(line) for line in inputs.read_text().splitlines()]
-        turns = [item for item in recorded if item.get("method") == "turn/start" or item.get("type") == "user" or item.get("event") == "user"]
+        turns = [item for item in recorded if item.get("method") in {"turn/start", "session/prompt"} or item.get("type") == "user"]
         assert len(turns) == 2
     finally:
         adapter.close()
@@ -190,12 +319,14 @@ def test_permission_denial_is_needs_human_even_with_success_envelope(wire, provi
     try:
         result = adapter.turn("needs-permission")
         assert not result.success and result.needs_human
-        if provider == "codex":
+        if provider in {"codex", "antigravity"}:
             assert result.delivery_unknown and result.status == "needs_human"
+            assert result.reason_code == "native_human_required"
             responses = [json.loads(line) for line in inputs.read_text().splitlines()]
             assert not any(item.get("id") == 9001 and "result" in item for item in responses)
         else:
             assert "permission" in result.error.lower()
+            assert result.reason_code == "native_denied"
     finally:
         adapter.close()
 
@@ -208,6 +339,7 @@ def test_failed_native_turn_cannot_be_reported_completed(wire, provider):
         result = adapter.turn("fail")
         assert not result.success
         assert result.error
+        assert result.reason_code == "native_result_failed"
     finally:
         adapter.close()
 
@@ -262,14 +394,23 @@ def test_busy_existing_native_session_is_not_cloned(tmp_path, monkeypatch):
 def test_timeout_closes_only_owned_child(wire):
     make, _ = wire
     adapter = make("antigravity")
+    adapter.start()
     result = adapter.turn("timeout", timeout=0.05)
     assert not result.success and "timed out" in result.error
+    assert result.reason_code == "native_transport_unknown"
     assert adapter.pid is None
 
 
-def test_interrupt_fences_result_and_preserves_native_id(wire):
+def test_turn_result_preserves_existing_positional_constructor():
+    result = adapters.TurnResult("Selected result", "owned-session", False, True,
+                                "Existing error", "owned-turn", True, True, True, "delivery_unknown")
+    assert result.status == "delivery_unknown" and result.reason_code is None
+
+
+@pytest.mark.parametrize("provider", ["claude", "antigravity"])
+def test_interrupt_fences_result_and_preserves_native_id(wire, provider):
     make, _ = wire
-    adapter = make("claude")
+    adapter = make(provider)
     assert adapter.turn("remember:blue").success
     results = []
     runner = threading.Thread(target=lambda: results.append(adapter.turn("timeout", timeout=10)))
@@ -434,6 +575,7 @@ def test_failed_durable_input_receipt_prevents_native_write(wire):
         result = adapter.turn("must not reach stdin")
         assert not result.success and not result.input_attempted and not result.delivery_unknown
         assert result.status == "not_sent" and "PRIVATE_" not in result.error
+        assert result.reason_code == "native_observer_failed"
         assert not any(json.loads(line).get("method") == "turn/start" for line in inputs.read_text().splitlines())
     finally:
         adapter.close()
@@ -495,6 +637,7 @@ def test_input_and_output_are_bounded(wire, monkeypatch):
 
 
 @pytest.mark.parametrize("provider,prompt,response", [
+    ("antigravity", "needs-permission", {"decision": "accept"}),
     ("codex", "needs-permission", {"decision": "accept"}),
     ("codex", "ask-question", {"answers": {"q1": {"answers": ["A"]}}}),
     ("codex", "elicitation", {"action": "accept", "content": {"name": "A"}}),
@@ -526,10 +669,15 @@ def test_exact_human_approval_is_routed_once_without_a_new_turn(wire, provider, 
         assert len(native_replies) == 1
         if provider == "codex":
             assert native_replies[0] == {"id": 9001, "result": response}
+        elif provider == "antigravity":
+            assert native_replies[0] == {"jsonrpc": "2.0", "id": 9001,
+                "result": {"outcome": {"outcome": "selected", "optionId": "actual-once"}}}
+            assert result.native_turn_id is None
+            assert views[0]["method"] == "session/request_permission"
         else:
             assert native_replies[0]["response"]["request_id"] == "native-request-1"
             assert native_replies[0]["response"]["response"]["updatedInput"].get("command", "private-sensitive-command") == "private-sensitive-command"
-        assert len([row for row in recorded if row.get("method") == "turn/start" or row.get("type") == "user"]) == 1
+        assert len([row for row in recorded if row.get("method") in {"turn/start", "session/prompt"} or row.get("type") == "user"]) == 1
     finally:
         adapter.close()
 
@@ -575,6 +723,7 @@ def test_subscription_only_codex_checks_native_account_before_model_input(wire, 
         assert "PRIVATE_" not in json.dumps(events)
         if auth_type != "chatgpt":
             assert not result.input_attempted and not result.delivery_unknown and result.needs_human
+            assert result.reason_code == "native_human_required"
     finally:
         adapter.close()
 
@@ -644,20 +793,74 @@ def test_agy_workspace_mcp_uses_inherited_identity_and_preserves_existing_config
     monkeypatch.setattr(adapters, "resolve_executable", lambda _: sys.executable)
     adapter = NativeAdapter("antigravity", tmp_path, "test-agent", tmp_path / "private-token")
     command = adapter._command(None)
+    assert command == [sys.executable, "acp"]
+    assert adapter._agy_model == "gemini-4-argon-high"
     config_path = tmp_path / ".agents/mcp_config.json"
-    config = json.loads(config_path.read_text())
-    assert config["mcpServers"]["sharebus"]["command"] == str(Path(sys.executable).resolve())
-    serialized = json.dumps(config)
-    assert "test-agent" not in serialized and "private-token" not in serialized and '"env"' not in serialized
-    assert "--log-file" not in command
-    original = config_path.read_bytes()
-    adapter._command("observed-exact-id")
-    assert config_path.read_bytes() == original
+    assert not config_path.exists()
+    config_path.parent.mkdir()
     config_path.write_text('{"mcpServers":{"other":{"command":"original"}}}')
     original = config_path.read_bytes()
-    with pytest.raises(RuntimeError, match="compatible Sharebus"):
-        adapter._command(None)
+    assert adapter._command("observed-exact-id") == command
     assert config_path.read_bytes() == original
+
+
+@pytest.mark.parametrize("model,effort", [
+    ("gemini-4-argon-high", None), ("gemini-4-argon-high", "high"),
+    ("gemini-4-argon-medium", "medium"), ("gemini-4-argon-low", "low"),
+    ("gemini-3.8-flash-high", "high"), ("gemini-3.8-flash-medium", "medium"), ("gemini-3.8-flash-low", "low"),
+])
+def test_agy_explicit_main_model_uses_exact_catalog_id_without_separate_effort(tmp_path, monkeypatch, model, effort):
+    import policy
+    monkeypatch.setattr(adapters, "resolve_executable", lambda _: sys.executable)
+    view = policy.read_policy(tmp_path)
+    view["team"]["providers"]["antigravity"]["main"].update(model_id=model, effort=effort)
+    policy.save_team(tmp_path, view["team"], expected_revision=view["revision"])
+    adapter = NativeAdapter("antigravity", tmp_path, "test-agent", tmp_path / "token")
+    command = adapter._command("observed-exact-id")
+    assert command == [sys.executable, "acp"]
+    assert adapter._agy_model == model
+    assert policy.read_policy(tmp_path)["runtime_enforced"] is False
+
+
+def test_agy_saved_null_model_retains_unresolved_request_without_rewriting(tmp_path, monkeypatch):
+    import policy
+    monkeypatch.setattr(adapters, "resolve_executable", lambda _: sys.executable)
+    view = policy.read_policy(tmp_path)
+    view["team"]["providers"]["antigravity"]["main"]["model_id"] = None
+    policy.save_team(tmp_path, view["team"], expected_revision=view["revision"])
+    path = tmp_path / policy.TEAM_PATH
+    original = path.read_bytes()
+    adapter = NativeAdapter("antigravity", tmp_path, "test-agent", tmp_path / "token")
+    command = adapter._command(None)
+    assert command == [sys.executable, "acp"] and adapter._agy_model is None
+    assert policy.load_team(tmp_path)["providers"]["antigravity"]["main"]["model_id"] is None
+    assert path.read_bytes() == original
+
+
+@pytest.mark.parametrize("model,effort", [
+    ("claude-opus-5-5", None), ("latest", None), ("gemini-4-argon-HIGH", None),
+    ("gemini-4-argon-high", "medium"), ("gemini-4-argon-high", "xhigh"),
+])
+def test_agy_unsupported_model_or_conflicting_effort_fails_before_child_start(tmp_path, monkeypatch, model, effort):
+    import policy
+    monkeypatch.setattr(adapters, "resolve_executable", lambda _: sys.executable)
+    view = policy.read_policy(tmp_path)
+    view["team"]["providers"]["antigravity"]["main"].update(model_id=model, effort=effort)
+    policy.save_team(tmp_path, view["team"], expected_revision=view["revision"])
+    monkeypatch.setattr(adapters.subprocess, "Popen", lambda *args, **kwargs: pytest.fail("Invalid AGY profile started a child"))
+    adapter = NativeAdapter("antigravity", tmp_path, "test-agent", tmp_path / "token")
+    with pytest.raises(adapters.NativeNeedsHuman, match="no fallback"):
+        adapter.start()
+    assert adapter.pid is None and not (tmp_path / ".agents/mcp_config.json").exists()
+
+
+def test_agy_parser_samples_keep_selected_response_and_discard_thinking(tmp_path):
+    adapter = NativeAdapter("antigravity", tmp_path, "test-agent", tmp_path / "token")
+    frame = {"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": "owned-sample",
+        "update": {"sessionUpdate": "agent_thought_chunk", "content": {"type": "text", "text": "PRIVATE_THOUGHT"}}}}
+    assert adapter._wire_event(frame) is None
+    frame["params"]["update"] = {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": "Selected public result"}}
+    assert adapter._wire_event(frame) is None  # AGY has only the SDK's reader.
 
 
 def test_native_config_write_refuses_replaced_workspace(tmp_path, monkeypatch):
@@ -678,13 +881,13 @@ def test_agy_config_hardlink_is_not_followed_or_overwritten(tmp_path, monkeypatc
     original.write_text("preserve this original")
     (tmp_path / ".agents").mkdir()
     os.link(original, tmp_path / ".agents/mcp_config.json")
-    with pytest.raises(RuntimeError, match="ordinary file"):
-        adapter._command(None)
+    assert adapter._command(None) == [sys.executable, "acp"]
     assert original.read_text() == "preserve this original"
 
 
-def test_subscription_child_environment_drops_api_and_ambient_harness_identity(wire, monkeypatch):
-    make, _ = wire
+@pytest.mark.parametrize("provider", ["codex", "claude", "antigravity"])
+def test_subscription_child_environment_drops_api_and_ambient_harness_identity(wire, monkeypatch, provider):
+    make, inputs = wire
     captured = []
     popen = adapters.subprocess.Popen
     def launch(*args, **kwargs):
@@ -695,14 +898,40 @@ def test_subscription_child_environment_drops_api_and_ambient_harness_identity(w
     monkeypatch.setenv("GOOGLE_GENAI_USE_VERTEXAI", "true")
     monkeypatch.setenv("AGY_ADC_AUTH", "true")
     monkeypatch.setenv("CODEX_THREAD_ID", "ambient-parent-thread")
-    monkeypatch.setattr(adapters.subprocess, "Popen", launch)
-    adapter = make("codex", subscription_only=True)
+    monkeypatch.setenv("CLAUDECODE", "1")
+    monkeypatch.setenv("CLAUDE_CODE_ENTRYPOINT", "synthetic-parent")
+    retained = {key: str(inputs.parent) for key in ("HOME", "USERPROFILE", "APPDATA", "LOCALAPPDATA")}
+    retained.update(AVALOKITA_PACKAGED_RUNTIME="1", AVALOKITA_RESOURCES_ROOT="synthetic-resources",
+                    SHAREBUS_NATIVE_TOOLS="relay", SYNTHETIC_NATIVE_SETTING="preserve")
+    for key, value in retained.items():
+        monkeypatch.setenv(key, value)
+    if provider != "antigravity":
+        monkeypatch.setattr(adapters.subprocess, "Popen", launch)
+    adapter = make(provider, subscription_only=True)
+    if provider == "antigravity":
+        start = adapter._acp.start
+        def start_acp(command, environment, resume_id, model_id):
+            captured.append(environment)
+            return start(command, environment, resume_id, model_id)
+        monkeypatch.setattr(adapter._acp, "start", start_acp)
+    auth_environments = []
+    if provider == "claude":
+        monkeypatch.setattr(adapter, "_check_subscription", lambda executable, environment: auth_environments.append(environment))
     try:
         assert adapter.turn("safe native subscription").success
         assert len(captured) == 1
-        assert not {"OPENAI_API_KEY", "GEMINI_API_KEY", "GOOGLE_GENAI_USE_VERTEXAI", "AGY_ADC_AUTH", "CODEX_THREAD_ID"} & set(captured[0])
-        assert captured[0]["SHAREBUS_AGENT_ID"] == adapter.agent_id
+        assert not {"OPENAI_API_KEY", "GEMINI_API_KEY", "GOOGLE_GENAI_USE_VERTEXAI", "AGY_ADC_AUTH",
+                    "CODEX_THREAD_ID", "CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT"} & set(captured[0])
+        assert all(captured[0][key] == value for key, value in retained.items())
+        assert all(captured[0][key] == value for key, value in {
+            "SHAREBUS_MANAGED": "1", "SHAREBUS_WORKSPACE": str(adapter.workspace),
+            "SHAREBUS_AGENT_ID": adapter.agent_id, "SHAREBUS_AGENT_TOKEN_FILE": str(adapter.token_file)}.items())
+        if provider == "claude":
+            assert len(auth_environments) == 1
+            assert not {"CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT"} & set(auth_environments[0])
+            assert all(auth_environments[0][key] == value for key, value in retained.items())
         assert os.environ["OPENAI_API_KEY"] == "PRIVATE_API_KEY"
+        assert os.environ["CLAUDECODE"] == "1" and os.environ["CLAUDE_CODE_ENTRYPOINT"] == "synthetic-parent"
     finally:
         adapter.close()
 

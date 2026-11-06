@@ -478,15 +478,17 @@ def _handler(provider: str, argv: list[str], *, timeout: int) -> dict:
 
 def install_auto(workspace: Path, *, home: Path | None = None, python: Path | None = None,
                  apply_changes: bool = False, replace: bool = False, watch_timeout: float | None = None,
-                 codex_native_queue: bool | None = None,
+                 codex_native_queue: bool | None = None, sidecar_probe_only: bool = False,
                  providers: Iterable[str] | None = None) -> dict:
-    """Install native context and selected wake configuration, without sending work."""
+    """Install native delivery unless an explicit diagnostic probe is requested."""
     selected = select_providers(providers)
+    if type(sidecar_probe_only) is not bool:
+        raise ValueError("Antigravity sidecar probe selection must be boolean.")
     root = Path(workspace).resolve(strict=True)
     executable = (python or Path(sys.executable)).resolve(strict=True)
     changes = prepare((home or Path.home()).resolve(), executable, replace=replace,
                       hooks_workspace=root, auto_hooks=True, watch_timeout=watch_timeout,
-                      codex_native_queue=codex_native_queue,
+                      codex_native_queue=codex_native_queue, sidecar_probe_only=sidecar_probe_only,
                       providers=None if providers is None else selected)
     settings = json.loads(changes[root / ".sharebus/hooks-install.json"])
     timeout = settings["watch_timeout_seconds"]

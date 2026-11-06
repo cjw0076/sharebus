@@ -30,7 +30,7 @@ class BusHTTPServer(ThreadingHTTPServer):
     def __init__(self, workspace: str | Path, *, providers: str = "none", port: int = 0,
                  enable_native: bool = True, discovery: list[dict[str, Any]] | None = None,
                  adapter_factory: Any = None, hosted_only: bool = False, store: BusStore | None = None,
-                 acquire_work=None):
+                 acquire_work=None, hosted_admission=None):
         self.store = store if store is not None else BusStore(workspace)
         self.store.guard_workspace()
         if store is not None and self.store.workspace != Path(workspace).absolute():
@@ -45,7 +45,7 @@ class BusHTTPServer(ThreadingHTTPServer):
         self.acquire_work = acquire_work
         self.supervisor = Supervisor(self.store, self.discovery, adapter_factory, hosted_only=hosted_only,
             hosted_execution_ready=lambda: not self._closed.is_set() and callable(self.avalokita_peer),
-            acquire_work=acquire_work)
+            acquire_work=acquire_work, hosted_admission=hosted_admission)
         if hosted_only:
             self.supervisor.hosted.recover()
         if providers != "none" and discovery is not None:
@@ -409,7 +409,28 @@ class BusHandler(BaseHTTPRequestHandler):
             elif path == "/api/agent/inbox":
                 if actor == "user":
                     raise BusError("Agent capability required", 403)
-                self._json(self.server.store.external_inbox(actor, int(body.get("after", 0)), body.get("ack", []), claim_work=body.get("claim", True)))
+                self._json(self.server.store.external_inbox(actor, int(body.get("after", 0)), body.get("ack", []), claim_work=body.get("claim", False)))
+            elif path == "/api/native/dispatch":
+                if actor == "user":
+                    raise BusError("Bound native agent capability required", 403)
+                required = {"workspace_id", "runtime_nonce", "job_id", "event_id", "root_id", "native_session_id"}
+                optional = {"generation", "provider", "native_address"}
+                if not required <= body.keys() or body.keys() - required - optional:
+                    raise BusError("Exact native dispatch fields required")
+                if (any(not isinstance(body[key], str) or not body[key] for key in required)
+                        or ("generation" in body and (type(body["generation"]) is not int or body["generation"] < 0))
+                        or ("provider" in body and not isinstance(body["provider"], str))
+                        or ("native_address" in body and body["native_address"] is not None
+                            and not isinstance(body["native_address"], str))):
+                    raise BusError("Invalid native dispatch values")
+                if (self.server.stopping or not self.server.native_enabled
+                        or body["workspace_id"] != self.server.store.workspace_id
+                        or not secrets.compare_digest(body["runtime_nonce"], self.server.nonce)):
+                    raise BusError("Native dispatch runtime binding changed", 409)
+                self.server.store.guard_workspace()
+                reservation = self.server.store.reserve_native_input(actor, body["job_id"], body["event_id"],
+                    body["root_id"], body["native_session_id"], **{key: body[key] for key in optional if key in body})
+                self._json({"dispatch": reservation})
             elif path == "/api/native/input":
                 self._operator(actor)
                 native_id = body.get("native_session_id")
@@ -424,6 +445,10 @@ class BusHandler(BaseHTTPRequestHandler):
             elif path == "/api/native/result":
                 if actor == "user":
                     raise BusError("Bound native agent capability required", 403)
+                if self.server.stopping or self.server._closed.is_set():
+                    raise BusError("Native completion runtime is closing", 409)
+                if body.keys() - {"native_session_id", "last_assistant_message", "job_id", "event_id", "requires_review_if_uncorrelated"}:
+                    raise BusError("Native completion fields cannot select its authority")
                 self._json(self.server.store.native_result(actor, body.get("native_session_id", ""), body.get("last_assistant_message", ""), body.get("job_id"), body.get("event_id"), body.get("requires_review_if_uncorrelated") is True))
             elif path in {"/api/artifact/publish", "/api/artifact/copy"}:
                 if path.endswith("copy"):

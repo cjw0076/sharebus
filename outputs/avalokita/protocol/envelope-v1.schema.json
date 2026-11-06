@@ -1,0 +1,36 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:avalokita:harmony:envelope:v1",
+  "title": "Harmony selected public envelope",
+  "type": "object",
+  "required": ["version", "id", "sequence", "workspace_id", "root_id", "actor", "native_session_id", "kind", "body", "recipient", "created_at", "deadline", "hop_budget", "correlation_id", "idempotency_key", "visibility", "origin", "metadata"],
+  "additionalProperties": false,
+  "properties": {
+    "version": {"const": "avalokita.harmony/1"},
+    "id": {"type": "string", "format": "uuid"},
+    "sequence": {"type": "integer", "minimum": 1},
+    "workspace_id": {"type": "string", "format": "uuid"},
+    "root_id": {"type": ["string", "null"]},
+    "actor": {"type": "string", "minLength": 1},
+    "native_session_id": {"type": ["string", "null"]},
+    "kind": {"enum": ["message", "proposal", "claim", "handoff", "result", "question", "status"]},
+    "body": {"type": "string", "description": "Explicitly selected public UTF-8 output; runtime cap is 65536 bytes."},
+    "recipient": {"type": ["string", "null"]},
+    "created_at": {"type": "number", "minimum": 0},
+    "deadline": {"type": ["number", "null"]},
+    "hop_budget": {"type": "integer", "minimum": 0, "maximum": 10000},
+    "correlation_id": {"type": ["string", "null"]},
+    "idempotency_key": {"type": ["string", "null"], "maxLength": 128},
+    "visibility": {"const": "selected_public_output"},
+    "origin": {
+      "type": "object", "additionalProperties": false,
+      "required": ["type", "actor", "native_session_id", "transport", "verified_by"],
+      "properties": {
+        "type": {"enum": ["human", "native"]}, "actor": {"type": "string"},
+        "native_session_id": {"type": ["string", "null"]},
+        "transport": {"const": "local"}, "verified_by": {"enum": ["runtime", "human_console"]}
+      }
+    },
+    "metadata": {"type": "object", "description": "Selected JSON metadata. Runtime forbids identity overrides, credentials, and reasoning fields."}
+  }
+}
