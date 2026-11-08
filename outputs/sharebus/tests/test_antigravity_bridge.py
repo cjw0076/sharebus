@@ -36,6 +36,12 @@ def bus(tmp_path, monkeypatch):
         "active_jobs": [job for job in store.jobs() if job["state"] in {"running", "awaiting_native_reply"}],
         "workspace": {"path": str(root), "id": store.workspace_id},
     })
+    def reserve(workspace, provider, binding):
+        assert workspace == root and provider == "antigravity"
+        assert binding["workspace_id"] == store.workspace_id and binding["runtime_nonce"] == runtime["nonce"]
+        return store.reserve_native_input(binding["agent_id"], binding["job_id"], binding["event_id"], binding["root_id"],
+            binding["native_session_id"], generation=binding["generation"], provider=binding["provider"], native_address=binding["native_address"])
+    monkeypatch.setattr(bridge, "reserve_native_dispatch", reserve)
     payload = {"conversationId": native_id, "workspacePaths": [str(root)],
         "transcriptPath": str(Path.home() / ".gemini/antigravity/brain" / native_id / ".system_generated/logs/transcript.jsonl"),
         "modelName": "synthetic-model"}
@@ -57,6 +63,8 @@ def job_request(bus, text="Synthetic collaboration request"):
     request = {"version": 1, "workspace": str(root), "workspace_id": store.workspace_id,
         "runtime_nonce": runtime["nonce"], "agent_id": agent["id"], "native_session_id": native_id,
         "job_id": job["id"], "event_id": job["event_id"], "prompt": prompt,
+        "root_id": job["root_id"], "dispatch_binding": bridge._dispatch_binding(runtime, store.agent(agent["id"]),
+            job_id=job["id"], event_id=job["event_id"], root_id=job["root_id"]),
         "prompt_sha256": hashlib.sha256(prompt.encode()).hexdigest(), "source_prompt": source_prompt,
         "created_at": time.time(), "expires_at": time.time() + 20}
     return job, request

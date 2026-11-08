@@ -13,6 +13,7 @@ import unittest
 import uuid
 from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 from urllib.error import HTTPError
 from urllib.request import Request, urlopen
@@ -23,19 +24,11 @@ from daemon import BusHTTPServer
 from store import BusError, BusStore
 
 
-def isolated_environment():
-    # Windows OpenSSL needs SystemRoot even for urllib's HTTP opener.
-    runtime = {}
-    if os.name == "nt" and "SYSTEMROOT" in os.environ:
-        runtime["SYSTEMROOT"] = os.environ["SYSTEMROOT"]
-    return patch.dict(os.environ, runtime, clear=True)
-
-
 class BootstrapTests(unittest.TestCase):
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory(prefix="sharebus-bootstrap-")
         self.root = Path(self.temporary.name).resolve()
-        self.environment = isolated_environment()
+        self.environment = patch.dict(os.environ, {}, clear=True)
         self.environment.start()
 
     def tearDown(self):
@@ -187,14 +180,19 @@ class BootstrapTests(unittest.TestCase):
         self.assertEqual(len(store.agents()), 1)
 
     def test_linked_or_reparse_ancestor_rejected_before_store_construction(self):
-        from types import SimpleNamespace
         self.enable()
         parent = self.root.parent
         original = Path.lstat
-        def reparse_stat(path):
-            info = original(path)
-            return SimpleNamespace(st_mode=info.st_mode, st_file_attributes=0x400) if path == parent else info
-        with patch.object(Path, "lstat", reparse_stat), patch.object(auto_enroll, "BusStore", wraps=BusStore) as constructor:
+
+        def reparse(path, *args, **kwargs):
+            info = original(path, *args, **kwargs)
+            if path == parent:
+                fields = {name: getattr(info, name) for name in dir(info) if name.startswith("st_")}
+                fields["st_file_attributes"] = getattr(info, "st_file_attributes", 0) | 0x400
+                return SimpleNamespace(**fields)
+            return info
+
+        with patch.object(Path, "lstat", reparse), patch.object(auto_enroll, "BusStore", wraps=BusStore) as constructor:
             with self.assertRaises(BusError):
                 self.hook()
             constructor.assert_not_called()
@@ -356,10 +354,11 @@ class BootstrapTests(unittest.TestCase):
         store = self.enable()
         expected = {}
         for state, awaiting in (("paused", False), ("stopped", True), ("idle", True)):
-            agent, _ = store.register("claude", role="CEO", mode="external_attached", native_session_id="restart-" + state)
+            agent, _ = store.register("claude", role="CEO", mode="native_attached", native_session_id="restart-" + state)
             store.send("user", agent["id"], "unfinished native work", "task")
             job = store.claim(agent["id"])
             if awaiting:
+                store.reserve_native_input(agent["id"], job["id"], job["event_id"], job["root_id"], agent["native_session_id"])
                 store.await_native(job["id"], "Accepted; not completed")
             if state != "idle":
                 store.update_agent(agent["id"], state=state)
@@ -379,7 +378,7 @@ class AutoHTTPTests(unittest.TestCase):
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory(prefix="sharebus-auto-http-")
         self.root = Path(self.temporary.name).resolve()
-        self.environment = isolated_environment()
+        self.environment = patch.dict(os.environ, {}, clear=True)
         self.environment.start()
         self.server = BusHTTPServer(self.root, providers="none", enable_native=False, discovery=[])
         self.store = self.server.store
@@ -585,6 +584,9 @@ class AutoHTTPTests(unittest.TestCase):
         self.store.send("user", actor, "bounded-task", "task")
         code, inbox, _ = self.cli("read", "--after", "0")
         self.assertEqual(code, 0)
+        self.assertEqual(inbox["jobs"], [])
+        code, inbox, _ = self.cli("receive", "--after", "0")
+        self.assertEqual(code, 0)
         self.assertEqual(len(inbox["jobs"]), 1)
         self.assertEqual(self.cli("publish", "--text", "snapshot", "--filename", "proof.txt")[0], 0)
         self.assertEqual(self.cli("send", "--to", "user", "--body", "completed", "--kind", "result")[0], 0)
@@ -606,7 +608,7 @@ class AutoHTTPTests(unittest.TestCase):
         actor = binding["agent_id"]
         self.store.send("user", actor, "first", "task")
         self.store.send("user", actor, "second", "task")
-        _, inbox, _ = self.cli("read")
+        _, inbox, _ = self.cli("receive")
         first = inbox["jobs"][0]["id"]
         code, acknowledged, _ = self.cli("ack", "--job-id", first)
         self.assertEqual(code, 0)
@@ -698,6 +700,7 @@ class AutoHTTPTests(unittest.TestCase):
         actor = binding["agent_id"]
         event = self.store.send("user", actor, "bounded native work", "task", budget=1)
         job = self.store.claim(actor)
+        self.store.reserve_native_input(actor, job["id"], job["event_id"], job["root_id"], binding["native_session_id"])
         self.store.await_native(job["id"], "Queue accepted; completion remains unverified")
         self.assertFalse(self.store.agent(actor)["channel_verified"])
         self.assertEqual(self.server.state(actor)["own_agent"]["attachment_status"], "native_bridge_pending_verification")
@@ -733,10 +736,12 @@ class AutoHTTPTests(unittest.TestCase):
             request.assert_not_called()
 
     def test_uncorrelated_or_wrong_native_callback_does_not_verify_delivery(self):
+        self.store.configure_auto(codex_delivery="native_queue")
         binding = self.connect()
         actor = binding["agent_id"]
         self.store.send("user", actor, "queued native work", "task")
         job = self.store.claim(actor)
+        self.store.reserve_native_input(actor, job["id"], job["event_id"], job["root_id"], binding["native_session_id"])
         self.store.await_native(job["id"], "Queue accepted")
         self.store.native_result(actor, binding["native_session_id"], "passive result")
         self.assertFalse(self.store.agent(actor)["channel_verified"])

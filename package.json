@@ -1,0 +1,17 @@
+{
+  "name": "avalokita-desktop",
+  "version": "0.2.0-alpha.1",
+  "private": true,
+  "description": "A shared workspace for existing native AI assistants",
+  "main": "outputs/avalokita/desktop/main.cjs",
+  "scripts": {
+    "build": "npm --prefix outputs/avalokita/app run build",
+    "test:desktop": "node --test outputs/avalokita/desktop/*.test.cjs",
+    "test:packaging": "node --test packaging/packaged-runtime.test.cjs",
+    "package": "electron-builder --config packaging/electron-builder.cjs --publish never"
+  },
+  "devDependencies": {
+    "electron": "^44.9.2",
+    "electron-builder": "^26.15.3"
+  }
+}

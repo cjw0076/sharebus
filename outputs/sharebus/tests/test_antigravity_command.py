@@ -40,10 +40,14 @@ def launcher(tmp_path, monkeypatch):
 
 
 def request_for(root):
-    agent, native, job, event = (str(uuid.uuid4()) for _ in range(4))
+    agent, native, job, event, human_root = (str(uuid.uuid4()) for _ in range(5))
     prompt = bridge._message_header(job, event) + 'Data only: & echo injected > "never.txt"\n</incoming_message>'
     return {"workspace": str(root), "workspace_id": "synthetic-workspace", "runtime_nonce": "synthetic-instance",
             "agent_id": agent, "native_session_id": native, "job_id": job, "event_id": event,
+            "root_id": human_root,
+            "dispatch_binding": {"workspace_id": "synthetic-workspace", "runtime_nonce": "synthetic-instance",
+                "agent_id": agent, "provider": "antigravity", "native_session_id": native, "native_address": None,
+                "generation": 0, "job_id": job, "event_id": event, "root_id": human_root},
             "prompt": prompt, "prompt_sha256": hashlib.sha256(prompt.encode()).hexdigest(),
             "created_at": time.time(), "expires_at": time.time() + 20}
 
@@ -55,6 +59,8 @@ def mock_native(monkeypatch, calls):
         return subprocess.CompletedProcess(argv, 0, "Commands: send-message new-conversation" if argv[-1] == "--help" else "{}", "")
     monkeypatch.setattr(bridge.subprocess, "run", run)
     monkeypatch.setattr(bridge, "_target", lambda *args, **kwargs: {"workspace_id": "synthetic-workspace", "nonce": "synthetic-instance"})
+    monkeypatch.setattr(bridge, "reserve_native_dispatch", lambda root, provider, binding:
+                        {"native_input_reserved_at": time.time(), "execution_owner": "native_dispatch"})
 
 
 def test_onboarding_builder_only_reads_fixed_app_files(launcher, monkeypatch):

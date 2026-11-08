@@ -1,0 +1,7 @@
+agent-client-protocol Python SDK 0.12.1
+Official project: https://github.com/agentclientprotocol/python-sdk
+Source tag 0.12.1: e668ed9e0034f5076749a6d74c5cec40ab610010
+License: Apache License, Version 2.0; see licenses/agent-client-protocol.LICENSE
+The original wheel license is also preserved under python/Lib/site-packages/agent_client_protocol-0.12.1.dist-info/licenses/LICENSE.
+The official wheel is extracted without source modifications. See ACP-SDK-RUNTIME.json for its SHA-256 and dependency overlay. No optional SDK transport or telemetry extras are selected.
+The wheel schema and license match the pinned official source commit; a reproducible build or PyPI attestation is not claimed.

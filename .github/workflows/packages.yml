@@ -1,0 +1,145 @@
+name: Platform packages
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  package:
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {id: win-x64, os: windows-2022, rust: x86_64-pc-windows-msvc, builder: '--win portable nsis --x64'}
+          - {id: mac-arm64, os: macos-15, rust: aarch64-apple-darwin, builder: '--mac dmg zip --arm64'}
+          - {id: mac-x64, os: macos-15-intel, rust: x86_64-apple-darwin, builder: '--mac dmg zip --x64'}
+          - {id: linux-x64, os: ubuntu-24.04, rust: x86_64-unknown-linux-gnu, builder: '--linux AppImage tar.gz --x64'}
+    runs-on: ${{ matrix.os }}
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: 24.14.0
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: 3.13.17
+      - name: Verify already patched Reason fork before any build
+        run: python scripts/verify_reason_source.py
+      - run: python scripts/verify_module_payload.py
+      - run: python -m compileall -q outputs/avalokita outputs/sharebus scripts
+      # Manual and same-repository PR candidates collect native-platform evidence.
+      # They still require all exact archives/locks/imports/smoke below. Tag builds
+      # and promotion retain the existing reviewed-evidence gate.
+      - name: Validate candidate inputs or require reviewed tagged build
+        run: python scripts/release_guard.py --mode ${{ github.event_name == 'push' && 'build' || 'validate' }}
+      - uses: dtolnay/rust-toolchain@686976e191b89faba57d3206551f0f330d8cb249
+        with:
+          toolchain: 1.93.1
+          targets: ${{ matrix.rust }}
+      - run: npm ci
+      - run: npm --prefix outputs/avalokita/app ci
+      - run: npm run test:packaging
+      - run: npm run test:desktop
+      - run: npm run build
+      - run: python scripts/verify_ui_payload.py
+      - name: Assemble private-independent Python and pinned dependencies
+        run: python scripts/assemble_runtime.py --platform ${{ matrix.id }} --execute
+      - name: Build the verified LF Reason fork source
+        working-directory: vendor/reason-network
+        env:
+          RUSTFLAGS: >-
+            --remap-path-prefix=${{ github.workspace }}=/avalokita/source
+            ${{ runner.os == 'Windows' && '-C target-feature=+crt-static' || '' }}
+        run: cargo build --release --locked --target ${{ matrix.rust }}
+      - run: python scripts/stage_reason.py --platform ${{ matrix.id }}
+      - run: python scripts/build_provenance.py
+      - name: Package candidate artifacts without publishing
+        env:
+          CSC_IDENTITY_AUTO_DISCOVERY: ${{ github.event_name == 'push' && 'true' || 'false' }}
+        run: npm run package -- ${{ matrix.builder }}
+      - if: runner.os != 'Linux'
+        run: python scripts/smoke_package.py --platform ${{ matrix.id }}
+      - if: runner.os == 'Linux'
+        run: xvfb-run -a python scripts/smoke_package.py --platform ${{ matrix.id }}
+      - run: python scripts/build_provenance.py --final --platform ${{ matrix.id }}
+      # Required: public repository on a current plan, or private/internal on
+      # Enterprise Cloud. Unsupported private plans fail here; see CI-POLICY.md.
+      - uses: actions/attest-build-provenance@977bb373ede98d70efdf65b84cb5f73e068dcc2a # v3
+        with:
+          subject-path: |
+            release/*.exe
+            release/*.dmg
+            release/*.zip
+            release/*.AppImage
+            release/*.tar.gz
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: Avalokita-${{ matrix.id }}
+          if-no-files-found: error
+          path: |
+            release/*.exe
+            release/*.dmg
+            release/*.zip
+            release/*.AppImage
+            release/*.tar.gz
+            release/SHA256SUMS-*
+            release/BUILD-PROVENANCE-*.json
+            release/GUI-SMOKE-*.json
+      - name: Preserve bounded package diagnostics after a failure
+        if: failure()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: Avalokita-diagnostics-${{ matrix.id }}
+          if-no-files-found: warn
+          path: |
+            release/GUI-SMOKE-*.json
+            build/runtime/IMPORT-PROBE-*.json
+
+  promote:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: package
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: 3.13.17
+      - name: Require frozen source, native/usefulness acceptance and channel-specific signature disclosure
+        run: python scripts/release_guard.py --mode publish
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: Avalokita-*
+          path: release
+          merge-multiple: true
+      - name: Verify checksums from every platform
+        shell: bash
+        run: |
+          cd release
+          for manifest in SHA256SUMS-*; do sha256sum --check "$manifest"; done
+      - name: Publish reviewed tagged prerelease
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        shell: bash
+        run: |
+          channel="$(python -c 'import json; print(json.load(open("release-policy.json"))["channel"])')"
+          flags=()
+          if [[ "$channel" != stable ]]; then flags+=(--prerelease); fi
+          gh release create "$RELEASE_TAG" release/* --verify-tag "${flags[@]}" --generate-notes

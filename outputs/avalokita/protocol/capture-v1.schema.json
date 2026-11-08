@@ -1,0 +1,15 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:avalokita:harmony:capture:v1",
+  "title": "Durable selected-public-output page",
+  "type": "object", "additionalProperties": false,
+  "required": ["version", "workspace_id", "pane_id", "root_id", "messages", "after", "next_cursor", "has_more", "truncated", "cursor_truncated", "retention", "visibility"],
+  "properties": {
+    "version": {"const": "avalokita.harmony/1"}, "workspace_id": {"type": "string"},
+    "pane_id": {"type": "string"}, "root_id": {"type": ["string", "null"]},
+    "messages": {"type": "array", "maxItems": 1000, "items": {"$ref": "urn:avalokita:harmony:envelope:v1"}},
+    "after": {"type": "integer", "minimum": 0}, "next_cursor": {"type": "integer", "minimum": 0},
+    "has_more": {"type": "boolean"}, "truncated": {"type": "boolean"}, "cursor_truncated": {"const": false},
+    "retention": {"const": "durable_no_automatic_pruning"}, "visibility": {"const": "selected_public_output"}
+  }
+}

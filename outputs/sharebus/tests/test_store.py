@@ -82,7 +82,8 @@ class StoreTests(unittest.TestCase):
     def test_native_receipt_preserves_human_control_and_completed_job_ownership(self):
         for control in ("paused", "stopped", "global"):
             with self.subTest(control=control):
-                agent, _ = self.store.register("hermes", control)
+                agent, _ = self.store.register("hermes", control, mode="native_attached",
+                                               native_session_id="synthetic-" + control)
                 self.store.send("user", agent["id"], "Native work", "task")
                 job = self.store.claim(agent["id"])
                 self.store.await_native(job["id"], "Preparing")
@@ -163,7 +164,7 @@ class StoreTests(unittest.TestCase):
     def test_external_ack_cannot_complete_another_agent_job(self):
         external, _ = self.store.register("hermes", "Research", mode="external_attached")
         self.store.send("user", external["id"], "Read", "task")
-        inbox = self.store.external_inbox(external["id"])
+        inbox = self.store.external_inbox(external["id"], claim_work=True)
         self.assertEqual(len(inbox["jobs"]), 1)
         other, _ = self.store.register("cursor", "Other")
         with self.assertRaises(BusError):

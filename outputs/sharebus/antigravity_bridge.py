@@ -23,7 +23,7 @@ from urllib.request import Request
 import uuid
 
 from mcp_server import BusClient, _read_private
-from native_bridge import NativeDeliveryResult, NeedsNativeAttach
+from native_bridge import NativeDeliveryResult, NeedsNativeAttach, _dispatch_binding, reserve_native_dispatch
 from sidecar_registry import RuntimeVerificationError, _register_workspace
 
 
@@ -142,7 +142,8 @@ def register_native_session(workspace: Path, payload: dict[str, Any], event: str
 
 
 def _target(workspace: Path, agent_id: str, native_id: str, *, job_id: str | None = None,
-            event_id: str | None = None, nonce: str | None = None) -> dict[str, Any]:
+            event_id: str | None = None, root_id: str | None = None,
+            nonce: str | None = None) -> dict[str, Any]:
     if not _safe(workspace, workspace / ".sharebus/enabled").is_file():
         raise NeedsNativeAttach("Native collaboration is not enabled in this workspace.")
     runtime = _runtime(workspace)
@@ -162,9 +163,12 @@ def _target(workspace: Path, agent_id: str, native_id: str, *, job_id: str | Non
         matches = [job for job in state.get("active_jobs", []) if job.get("id") == job_id
                    and job.get("agent_id") == agent_id and job.get("event_id") == event_id
                    and job.get("root_id") == own.get("active_root")
+                   and (root_id is None or job.get("root_id") == root_id)
                    and job.get("state") in {"running", "awaiting_native_reply"}]
         if len(matches) != 1:
             raise NeedsNativeAttach("Native dispatch has no exact active owned job and event.")
+        runtime = {**runtime, "dispatch_binding": _dispatch_binding(runtime, own,
+                   job_id=job_id, event_id=event_id, root_id=matches[0]["root_id"])}
     return runtime
 
 
@@ -281,18 +285,23 @@ class AntigravityAttachedAdapter:
                 raise NeedsNativeAttach("Attach the exact native conversation first.")
             trusted_header, separator, message = prompt.partition("<incoming_message>\n")
             markers = _MARKER.findall(trusted_header)
-            if not separator or not prompt.endswith("\n</incoming_message>") or len(markers) != 1:
+            identifier = r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"
+            roots = re.findall(r"^Human root: (" + identifier + r")\. Remaining automatic turns: \d+\.$", trusted_header, re.M)
+            identities = re.findall(r"^Your agent ID: (" + identifier + r")\. Provider: antigravity\.$", trusted_header, re.M)
+            if (not separator or not prompt.endswith("\n</incoming_message>") or len(markers) != 1
+                    or len(roots) != 1 or identities != [self.agent_id]):
                 raise NeedsNativeAttach("One exact bus job/event marker and bounded message envelope are required.")
             event_id, job_id = map(_identifier, markers[0])
             self._current_job = job_id
             channel = self._channel()
-            runtime = _target(self.workspace, self.agent_id, self.session_id, job_id=job_id, event_id=event_id)
+            runtime = _target(self.workspace, self.agent_id, self.session_id, job_id=job_id, event_id=event_id, root_id=roots[0])
             if channel.get("runtime_nonce") != runtime["nonce"]:
                 raise NeedsNativeAttach("The app sidecar has not connected to this broker generation.")
             delivery_prompt = _message_header(job_id, event_id) + message
             request = {"version": 1, "workspace": str(self.workspace), "workspace_id": runtime["workspace_id"],
                        "runtime_nonce": runtime["nonce"], "agent_id": self.agent_id,
                        "native_session_id": self.session_id, "job_id": job_id, "event_id": event_id,
+                       "root_id": roots[0], "dispatch_binding": runtime["dispatch_binding"],
                        "prompt": delivery_prompt, "prompt_sha256": hashlib.sha256(delivery_prompt.encode("utf-8")).hexdigest(),
                        "created_at": time.time(), "expires_at": time.time() + timeout}
             base = self.workspace / CHANNEL
@@ -301,7 +310,7 @@ class AntigravityAttachedAdapter:
                 _write(self.workspace, request_path, request, exclusive=True)
             except FileExistsError:
                 prior = _read(self.workspace, request_path)
-                if any(prior.get(key) != request[key] for key in ("agent_id", "native_session_id", "event_id", "runtime_nonce", "prompt_sha256")):
+                if any(prior.get(key) != request[key] for key in ("agent_id", "native_session_id", "event_id", "root_id", "runtime_nonce", "prompt_sha256", "dispatch_binding")):
                     raise NeedsNativeAttach("A native dispatch cannot be changed or replayed under the same job ID.")
             deadline = time.monotonic() + timeout
             try:
@@ -309,7 +318,7 @@ class AntigravityAttachedAdapter:
                     path = base / "receipts" / (job_id + ".json")
                     if path.exists():
                         receipt = _read(self.workspace, path)
-                        if any(receipt.get(key) != request[key] for key in ("agent_id", "native_session_id", "event_id", "job_id", "runtime_nonce", "prompt_sha256")):
+                        if any(receipt.get(key) != request[key] for key in ("agent_id", "native_session_id", "event_id", "job_id", "root_id", "runtime_nonce", "prompt_sha256", "dispatch_binding")):
                             raise NeedsNativeAttach("Native receipt correlation does not match this dispatch.")
                         accepted = receipt.get("status") == "command_accepted"
                         text = "agentapi accepted the command; awaiting the existing app session's correlated result." if accepted else "Native delivery is unconfirmed; review before sending a new request."
@@ -412,7 +421,7 @@ class SidecarWorker:
                 continue
 
     def _receipt(self, root: Path, request: dict[str, Any], status: str, **extra: Any) -> None:
-        result = {key: request[key] for key in ("agent_id", "native_session_id", "event_id", "job_id", "runtime_nonce", "prompt_sha256")}
+        result = {key: request[key] for key in ("agent_id", "native_session_id", "event_id", "job_id", "root_id", "runtime_nonce", "prompt_sha256", "dispatch_binding")}
         result.update({"status": status, "sidecar_instance_id": self.instance_id, "recorded_at": time.time(), "delivery_only": True, **extra})
         _write(root, root / CHANNEL / "receipts" / (_identifier(request["job_id"]) + ".json"), result)
 
@@ -434,8 +443,12 @@ class SidecarWorker:
             self._receipt(root, request, "needs_human")
             return False
         try:
+            binding = request["dispatch_binding"]
+            if (binding.get("provider") != "antigravity" or any(binding.get(key) != request[key] for key in
+                    ("agent_id", "native_session_id", "job_id", "event_id", "root_id", "workspace_id", "runtime_nonce"))):
+                raise NeedsNativeAttach("The original native dispatch binding changed.")
             runtime = _target(root, _identifier(request["agent_id"]), _identifier(request["native_session_id"]),
-                    job_id=job_id, event_id=_identifier(request["event_id"]), nonce=request["runtime_nonce"])
+                    job_id=job_id, event_id=_identifier(request["event_id"]), root_id=_identifier(request["root_id"]), nonce=request["runtime_nonce"])
             if request.get("workspace_id") != runtime["workspace_id"]:
                 raise NeedsNativeAttach("Dispatch workspace identity does not match its broker.")
             if not prompt.startswith(_message_header(job_id, request["event_id"])) or not prompt.endswith("\n</incoming_message>"):
@@ -454,7 +467,7 @@ class SidecarWorker:
                 return False
             # Human control may have changed while the claim was flushed.
             _target(root, request["agent_id"], request["native_session_id"],
-                    job_id=job_id, event_id=request["event_id"], nonce=request["runtime_nonce"])
+                    job_id=job_id, event_id=request["event_id"], root_id=request["root_id"], nonce=request["runtime_nonce"])
             command, command_receipt = _agentapi_command(self.helper, self.command_binding)
             if self._command_prefix is not None and (command != self._command_prefix or command_receipt != self._command_receipt):
                 raise NeedsNativeAttach("The probed agentapi command changed; automatic dispatch is disabled.")
@@ -462,7 +475,7 @@ class SidecarWorker:
             # change. Recheck authority after hashing, immediately before spawn.
             try:
                 runtime = _target(root, request["agent_id"], request["native_session_id"],
-                        job_id=job_id, event_id=request["event_id"], nonce=request["runtime_nonce"])
+                        job_id=job_id, event_id=request["event_id"], root_id=request["root_id"], nonce=request["runtime_nonce"])
                 if runtime["workspace_id"] != request["workspace_id"]:
                     raise NeedsNativeAttach("The dispatch workspace changed before native input.")
             except Exception:
@@ -475,6 +488,7 @@ class SidecarWorker:
             if remaining <= 0:
                 self._receipt(root, request, "not_sent", reason="expired_before_send", native_input_attempted=False)
                 return False
+            reserve_native_dispatch(root, "antigravity", request["dispatch_binding"])
             # The original prompt is one argv item, never a shell command.
             result = subprocess.run([*command, "send-message", request["native_session_id"], prompt],
                 capture_output=True, text=True, shell=False, encoding="utf-8", errors="replace",

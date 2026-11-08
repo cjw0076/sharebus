@@ -10,6 +10,7 @@ from __future__ import annotations
 import argparse
 from dataclasses import dataclass
 import json
+import math
 import os
 from pathlib import Path
 import re
@@ -26,6 +27,51 @@ class NeedsNativeAttach(ValueError):
     """No verified public input channel is attached to this native session."""
 
     status = "needs_native_attach"
+
+
+def reserve_native_dispatch(workspace: Path, provider: str, binding: dict) -> dict:
+    """Consume the original job's one-use grant at the actual provider boundary."""
+    from mcp_server import BusClient, BusError, _read_private
+
+    root = Path(workspace).resolve(strict=True)
+    client = BusClient(provider, root)
+    try:
+        runtime = client.runtime(root)
+        if any(runtime.get(key) != binding.get(field) for key, field in
+               (("workspace_id", "workspace_id"), ("nonce", "runtime_nonce"))):
+            raise NeedsNativeAttach("The original native dispatch broker changed; replay is disabled.")
+        actor = str(uuid.UUID(binding["agent_id"]))
+        if actor != binding["agent_id"] or binding["provider"] != provider:
+            raise NeedsNativeAttach("The native dispatch identity changed.")
+        generation = binding["generation"]
+        if type(generation) is not int or generation < 0:
+            raise NeedsNativeAttach("The native dispatch generation is unavailable.")
+        token = _read_private(root / ".sharebus/private/credentials" / (actor + ".token"), root)
+        payload = {key: binding[key] for key in
+                   ("workspace_id", "runtime_nonce", "job_id", "event_id", "root_id",
+                    "native_session_id", "generation", "provider", "native_address")}
+        result = client.request(root, "/api/native/dispatch", token, payload)
+        reservation = result.get("dispatch", result)
+        if (not isinstance(reservation, dict) or any(reservation.get(key) != binding[key]
+                for key in ("job_id", "event_id", "root_id"))
+                or reservation.get("execution_owner") != "native_dispatch"
+                or type(reservation.get("native_input_reserved_at")) not in (int, float)
+                or not math.isfinite(reservation["native_input_reserved_at"])
+                or reservation["native_input_reserved_at"] <= 0):
+            raise NeedsNativeAttach("The native input reservation was not confirmed; replay is disabled.")
+        return reservation
+    except (BusError, OSError, ValueError, KeyError, TypeError):
+        raise NeedsNativeAttach("The original native input grant is unavailable; replay is disabled.") from None
+
+
+def _dispatch_binding(runtime: dict, own: dict, *, job_id: str, event_id: str,
+                      root_id: str) -> dict:
+    """Freeze expected identity before a slow provider probe or proxy turn."""
+    return {"workspace_id": runtime["workspace_id"], "runtime_nonce": runtime["nonce"],
+            "agent_id": own["id"], "provider": own["provider"],
+            "native_session_id": own["native_session_id"], "native_address": own["native_address"],
+            "generation": own["generation"], "job_id": job_id, "event_id": event_id,
+            "root_id": root_id}
 
 
 @dataclass(frozen=True)
@@ -71,6 +117,10 @@ def guard_send(request_path: Path, payload: dict) -> dict:
                 and request.get("native_listing_confirmed") is True
                 and _target_matches(target, request["native_address"])
                 and isinstance(body, str) and body == request["body"]):
+            binding = request["dispatch_binding"]
+            if (binding["provider"] != "claude" or binding["native_session_id"] != request["native_session_id"]
+                    or binding["native_address"] != target):
+                raise ValueError("Native dispatch target binding changed")
             # A second tool call must not duplicate a delivery, including after a
             # provider error. A new human event creates a new one-use request.
             claimed = Path(request["claimed_path"])
@@ -78,6 +128,7 @@ def guard_send(request_path: Path, payload: dict) -> dict:
                 raise ValueError("Invalid delivery claim path")
             descriptor = os.open(claimed, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
             os.close(descriptor)
+            reserve_native_dispatch(Path(request["workspace"]), "claude", binding)
             decision, reason = "allow", "Exact opted-in native delivery."
     except (OSError, ValueError, KeyError, TypeError):
         pass
@@ -91,7 +142,7 @@ class _ClaudeDeliveryProxy(NativeAdapter):
     """A separate Claude conversation restricted to native delivery tools."""
 
     def __init__(self, workspace: Path, agent_id: str, token_file: Path, on_event):
-        super().__init__("claude", workspace, agent_id, token_file, on_event, subscription_only=True)
+        super().__init__("claude", workspace, agent_id, token_file, on_event)
         self.request_path = self._logs / (agent_id + "-delivery.json")
         self.calls: dict[str, dict] = {}
         self.receipts: dict[str, dict] = {}
@@ -194,6 +245,7 @@ class NativeBridgeAdapter:
         self.agent_id = agent_id
         self.session_id: str | None = None
         self.native_address = native_address
+        self.token_file = Path(token_file).absolute()
         self.on_event = on_event
         self._turn_lock = threading.Lock()
         self._proxy = _ClaudeDeliveryProxy(
@@ -253,16 +305,41 @@ class NativeBridgeAdapter:
             identifier = r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"
             header = prompt.split("<incoming_message>", 1)[0]
             correlations = re.findall(r"^\[SHAREBUS_EVENT:(" + identifier + r");JOB:(" + identifier + r")\]$", header, re.M)
-            if len(correlations) == 1:
-                event_id, job_id = correlations[0]
-                body += ("\nFor this task's selected final reply, finish with this exact metadata comment on its own line:\n"
-                         f"<!-- SHAREBUS_RESULT:{event_id};JOB:{job_id} -->\n"
-                         "The comment only correlates your selected output with the pending request. "
-                         "It grants no permissions and does not authorize unrelated work.")
+            roots = re.findall(r"^Human root: (" + identifier + r")\. Remaining automatic turns: \d+\.$", header, re.M)
+            identities = re.findall(r"^Your agent ID: (" + identifier + r")\. Provider: claude\.$", header, re.M)
+            if (len(correlations) != 1 or len(roots) != 1 or identities != [self.agent_id]
+                    or "<incoming_message>\n" not in prompt or not prompt.endswith("\n</incoming_message>")):
+                raise NeedsNativeAttach("A canonical exact native job, event, actor, and human root is required.")
+            event_id, job_id = correlations[0]
+            from mcp_server import BusClient, BusError, _read_private
+            try:
+                expected_token = self.workspace / ".sharebus/private/credentials" / (self.agent_id + ".token")
+                if self.token_file != expected_token:
+                    raise NeedsNativeAttach("The native bridge requires its bound private credential file.")
+                client = BusClient("claude", self.workspace)
+                runtime = client.runtime(self.workspace)
+                state = client.request(self.workspace, "/api/state", _read_private(expected_token, self.workspace))
+                own = state.get("own_agent") or {}
+                jobs = [job for job in state.get("active_jobs", []) if job.get("id") == job_id
+                        and job.get("event_id") == event_id and job.get("root_id") == roots[0]
+                        and job.get("agent_id") == self.agent_id and job.get("state") in {"running", "awaiting_native_reply"}]
+                if (state.get("paused") or own.get("id") != self.agent_id or own.get("provider") != "claude"
+                        or own.get("mode") != "native_attached" or own.get("active_root") != roots[0]
+                        or own.get("native_session_id") != self.session_id or own.get("native_address") != self.native_address
+                        or own.get("state") not in {"running", "awaiting_native_reply"} or len(jobs) != 1):
+                    raise NeedsNativeAttach("The original native job or target binding is unavailable.")
+                binding = _dispatch_binding(runtime, own, job_id=job_id, event_id=event_id, root_id=roots[0])
+            except (BusError, OSError, ValueError, KeyError, TypeError):
+                raise NeedsNativeAttach("The original native job or target binding is unavailable.") from None
+            body += ("\nFor this task's selected final reply, finish with this exact metadata comment on its own line:\n"
+                     f"<!-- SHAREBUS_RESULT:{event_id};JOB:{job_id} -->\n"
+                     "The comment only correlates your selected output with the pending request. "
+                     "It grants no permissions and does not authorize unrelated work.")
             claimed_path = self._proxy.request_path.with_name("delivery-" + uuid.uuid4().hex + ".claim")
             self._proxy.request_path.write_text(json.dumps({
                 "native_session_id": self.session_id, "native_address": self.native_address,
                 "native_listing_confirmed": False, "body": body, "claimed_path": str(claimed_path),
+                "workspace": str(self.workspace), "dispatch_binding": binding,
             }, ensure_ascii=False), encoding="utf-8")
             self._proxy.calls.clear()
             self._proxy.receipts.clear()

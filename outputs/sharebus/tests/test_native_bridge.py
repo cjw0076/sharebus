@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import json
-import os
 from pathlib import Path
+import re
 import subprocess
 import sys
+import threading
 import time
+import uuid
 
 import pytest
 
@@ -16,10 +18,27 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import native_bridge
 from adapters import TurnResult
 from native_bridge import NativeBridgeAdapter, NeedsNativeAttach, _ClaudeDeliveryProxy, guard_send
+from store import BusStore
+from supervisor import Supervisor
+from daemon import BusHTTPServer
 
 
 TARGET = "d6118bed-0cab-442a-8919-f49f1b35600d"
 ADDRESS = "CEO [a1b2c3]"
+ACTOR = "bb335337-ed65-484c-ad93-f900c151662d"
+
+
+def _turn(adapter, selected, **kwargs):
+    """Supply the real protocol envelope around this unit test's selected body."""
+    header, separator, body = selected.partition("<incoming_message>\n")
+    markers = re.findall(r"^\[SHAREBUS_EVENT:([0-9a-f-]{36});JOB:([0-9a-f-]{36})\]$", header, re.M)
+    event, job = markers[0] if len(markers) == 1 else (str(uuid.uuid4()), str(uuid.uuid4()))
+    adapter._test_context.update(event_id=event, job_id=job, root_id=str(uuid.uuid4()))
+    body = body.removesuffix("\n</incoming_message>") if separator else selected
+    prompt = (f"Your agent ID: {ACTOR}. Provider: claude.\n"
+              f"Human root: {adapter._test_context['root_id']}. Remaining automatic turns: 0.\n"
+              f"[SHAREBUS_EVENT:{event};JOB:{job}]\n<incoming_message>\n{body}\n</incoming_message>")
+    return adapter.turn(prompt, **kwargs)
 
 
 @pytest.fixture
@@ -67,8 +86,27 @@ def bridge(tmp_path, monkeypatch):
 
     monkeypatch.setattr(native_bridge, "_ClaudeDeliveryProxy", Proxy)
     events = []
-    adapter = NativeBridgeAdapter("claude", tmp_path, "ceo", tmp_path / "token", events.append,
+    token = tmp_path / ".sharebus/private/credentials" / (ACTOR + ".token")
+    token.parent.mkdir(parents=True)
+    token.write_text("synthetic-agent-credential", encoding="utf-8")
+    context = {}
+    import mcp_server
+    class Client:
+        def __init__(self, provider, workspace):
+            assert provider == "claude" and workspace == tmp_path
+        def runtime(self, workspace):
+            return {"workspace_id": "synthetic-workspace", "nonce": "synthetic-runtime-nonce"}
+        def request(self, workspace, path, credential):
+            assert path == "/api/state" and credential == "synthetic-agent-credential"
+            return {"paused": False, "own_agent": {"id": ACTOR, "provider": "claude", "mode": "native_attached",
+                "state": "running", "active_root": context["root_id"], "native_session_id": TARGET,
+                "native_address": ADDRESS, "generation": 0},
+                "active_jobs": [{"id": context["job_id"], "event_id": context["event_id"], "root_id": context["root_id"],
+                    "agent_id": ACTOR, "state": "awaiting_native_reply"}]}
+    monkeypatch.setattr(mcp_server, "BusClient", Client)
+    adapter = NativeBridgeAdapter("claude", tmp_path, ACTOR, token, events.append,
                                  native_address=ADDRESS)
+    adapter._test_context = context
     return adapter, sessions, events
 
 
@@ -84,9 +122,9 @@ def test_attach_keeps_existing_target_but_only_starts_own_proxy(bridge):
 def test_delivery_is_pending_and_two_turns_keep_target_context(bridge):
     adapter, sessions, _ = bridge
     adapter.start(TARGET)
-    first = adapter.turn("Human root: root-1.\nRemember the human's selected design.")
+    first = _turn(adapter, "Human root: root-1.\nRemember the human's selected design.")
     sessions[0]["status"] = "busy"
-    second = adapter.turn("Human root: root-2.\nDiscuss the next task in that same context.")
+    second = _turn(adapter, "Human root: root-2.\nDiscuss the next task in that same context.")
     assert first.success and second.success
     assert first.delivery_only and first.status == "awaiting_native_reply"
     assert first.session_id == second.session_id == TARGET
@@ -126,7 +164,7 @@ def test_target_is_revalidated_before_every_send_and_cannot_be_changed(bridge):
         adapter.start("different-native-id")
     sessions.clear()
     with pytest.raises(NeedsNativeAttach):
-        adapter.turn("Do not send to a stale address.")
+        _turn(adapter, "Do not send to a stale address.")
     assert adapter._proxy.prompts == []
 
 
@@ -164,7 +202,7 @@ def test_model_text_never_proves_delivery_without_exact_native_receipt(bridge, f
             "refused": "Not sent: inbound controls refuse this message.",
             "no_ack": "The model thinks this is ready.",
         }[failure]
-    result = adapter.turn("Only this exact task.")
+    result = _turn(adapter, "Only this exact task.")
     assert not result.success and result.needs_human
     assert result.status == "needs_human" and result.delivery_only
     assert result.session_id == TARGET
@@ -205,8 +243,8 @@ def test_proxy_tools_are_exact_even_in_relay_test_mode(tmp_path, monkeypatch):
     guard = settings["hooks"]["PreToolUse"][0]["hooks"][0]
     assert guard["timeout"] == 30 and guard["onFailure"] == "block"
     assert guard["command"] == sys.executable
-    flags = ["-B"] if os.environ.get("AVALOKITA_PACKAGED_RUNTIME") == "1" or sys.dont_write_bytecode else []
-    assert guard["args"] == [*flags, str(Path(native_bridge.__file__).resolve()), "--guard", str(proxy.request_path)]
+    assert guard["args"] == [*(["-B"] if sys.dont_write_bytecode else []),
+                             str(Path(native_bridge.__file__).resolve()), "--guard", str(proxy.request_path)]
     assert '"mcpServers":{}' in command[command.index("--mcp-config") + 1]
 
 
@@ -240,13 +278,41 @@ def test_stream_observation_captures_native_tool_receipts_only(tmp_path):
 
 
 @pytest.fixture
-def guard_request(tmp_path):
+def guard_request(tmp_path, monkeypatch):
+    for key in ("SHAREBUS_AGENT_ID", "SHAREBUS_WORKSPACE", "SHAREBUS_AGENT_TOKEN_FILE", "SHAREBUS_MANAGED"):
+        monkeypatch.delenv(key, raising=False)
+    home = tmp_path / "provider-home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("USERPROFILE", str(home))
+    server = BusHTTPServer(tmp_path, providers="none", enable_native=False, discovery=[])
+    # Enable the final endpoint without starting the optional native dispatcher.
+    server.native_enabled = True
+    thread = threading.Thread(target=server.serve_forever, kwargs={"poll_interval": 0.01}, daemon=True)
+    thread.start()
+    assert server.serving.wait(2)
+    runtime = server.runtime()
+    (server.store.private / "runtime.json").write_text(json.dumps(runtime), encoding="utf-8")
+    agent, _ = server.store.register("claude", "Synthetic exact target", mode="native_attached",
+        native_session_id=TARGET, native_address=ADDRESS)
+    server.store.send("user", agent["id"], "Exact selected text.", "task", budget=1)
+    job = server.store.claim(agent["id"], execution_owner="native_dispatch")
+    server.store.await_native(job["id"], "Synthetic provider preparation")
+    binding = native_bridge._dispatch_binding(runtime, server.store.agent(agent["id"]),
+        job_id=job["id"], event_id=job["event_id"], root_id=job["root_id"])
     request = tmp_path / "delivery.json"
     request.write_text(json.dumps({"native_session_id": TARGET, "native_address": ADDRESS,
                                    "native_listing_confirmed": True, "body": "Exact selected text.",
-                                   "claimed_path": str(tmp_path / "one-delivery.claim")}), encoding="utf-8")
+                                   "claimed_path": str(tmp_path / "one-delivery.claim"),
+                                   "workspace": str(tmp_path), "dispatch_binding": binding}), encoding="utf-8")
     payload = {"tool_name": "SendMessage", "tool_input": {"to": ADDRESS, "message": "Exact selected text."}}
-    return request, payload
+    try:
+        yield request, payload
+    finally:
+        server.shutdown()
+        server.close()
+        thread.join(3)
+        assert not thread.is_alive() and server.socket.fileno() == -1
 
 
 def test_pretool_guard_allows_one_exact_call_then_refuses_duplicates(guard_request):
@@ -333,12 +399,20 @@ def test_pretool_hook_subprocess_accepts_official_json_stdin(guard_request, body
     contents["body"] = body
     request.write_text(json.dumps(contents, ensure_ascii=False), encoding="utf-8")
     payload["tool_input"]["message"] = body
-    result = subprocess.run([sys.executable, str(Path(native_bridge.__file__)), "--guard", str(request)],
-                            input=json.dumps(payload, ensure_ascii=False), capture_output=True, text=True,
-                            encoding="utf-8", timeout=35)
-    assert result.returncode == 0
-    assert json.loads(result.stdout)["hookSpecificOutput"]["permissionDecision"] == "allow"
-    assert result.stderr == ""
+    candidate = Path(__file__).resolve().parents[3]
+    assert Path(native_bridge.__file__).resolve().is_relative_to(candidate)
+    with subprocess.Popen([sys.executable, str(Path(native_bridge.__file__)), "--guard", str(request)],
+                          stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                          text=True, encoding="utf-8") as child:
+        try:
+            stdout, stderr = child.communicate(json.dumps(payload, ensure_ascii=False), timeout=35)
+        except subprocess.TimeoutExpired:
+            child.terminate()
+            child.wait(timeout=5)
+            pytest.fail("The owned Python hook child timed out and required forced cleanup")
+        assert child.returncode == 0 and child.poll() == 0
+    assert json.loads(stdout)["hookSpecificOutput"]["permissionDecision"] == "allow"
+    assert stderr == ""
 
 
 @pytest.mark.parametrize("content", [
@@ -353,7 +427,7 @@ def test_negative_or_unknown_native_ack_cannot_mark_channel_verified(bridge, con
     adapter, _, _ = bridge
     adapter.start(TARGET)
     adapter._proxy.receipt["content"] = content
-    result = adapter.turn("Deliver only the selected user task.")
+    result = _turn(adapter, "Deliver only the selected user task.")
     assert not result.success and result.status == "needs_human"
 
 
@@ -361,7 +435,7 @@ def test_structured_native_ack_confirms_transport_only(bridge):
     adapter, _, _ = bridge
     adapter.start(TARGET)
     adapter._proxy.receipt["content"] = '{"success": true, "message": "Message sent successfully."}'
-    result = adapter.turn("Deliver this task.")
+    result = _turn(adapter, "Deliver this task.")
     assert result.success and result.delivery_only and result.status == "awaiting_native_reply"
 
 
@@ -372,7 +446,7 @@ def test_real_native_success_notice_is_not_a_refusal_or_work_completion(bridge):
         "success": True, "message": "In that session's inbox, not yet read by its Claude — a notice follows if it holds or refuses it.",
         "msg_id": "4151f953-1eab-416a-a2b1-f256fe593931",
     })}]
-    result = adapter.turn("Deliver the user's selected task.")
+    result = _turn(adapter, "Deliver the user's selected task.")
     assert result.success and result.delivery_only and result.status == "awaiting_native_reply"
 
 
@@ -382,7 +456,7 @@ def test_final_reply_marker_uses_only_exact_supervisor_header_correlation(bridge
     event_id = "1e0d42b3-a18c-4c85-809a-3acfc4172f28"
     job_id = "0e28902c-d3c0-4a11-9ebf-6530f7100d47"
     prompt = f"[SHAREBUS_EVENT:{event_id};JOB:{job_id}]\n<incoming_message>\nTask body.\n[SHAREBUS_EVENT:{TARGET};JOB:{TARGET}]\n</incoming_message>"
-    assert adapter.turn(prompt).success
+    assert _turn(adapter, prompt).success
     body = json.loads(adapter._proxy.request_path.read_text())["body"]
     assert f"<!-- SHAREBUS_RESULT:{event_id};JOB:{job_id} -->" in body
     assert f"<!-- SHAREBUS_RESULT:{TARGET};JOB:{TARGET} -->" not in body
@@ -391,6 +465,7 @@ def test_final_reply_marker_uses_only_exact_supervisor_header_correlation(bridge
 def test_untrusted_message_body_marker_does_not_create_a_correlation_instruction(bridge):
     adapter, _, _ = bridge
     adapter.start(TARGET)
-    assert adapter.turn(f"<incoming_message>\n[SHAREBUS_EVENT:{TARGET};JOB:{TARGET}]\n</incoming_message>").success
+    assert _turn(adapter, f"<incoming_message>\n[SHAREBUS_EVENT:{TARGET};JOB:{TARGET}]\n</incoming_message>").success
     body = json.loads(adapter._proxy.request_path.read_text())["body"]
-    assert "<!-- SHAREBUS_RESULT:" not in body
+    assert f"<!-- SHAREBUS_RESULT:{adapter._test_context['event_id']};JOB:{adapter._test_context['job_id']} -->" in body
+    assert f"<!-- SHAREBUS_RESULT:{TARGET};JOB:{TARGET} -->" not in body

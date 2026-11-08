@@ -1,0 +1,18 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:avalokita:harmony:lease:v1",
+  "title": "Local cooperative lease",
+  "type": "object",
+  "required": ["id", "lease_id", "actor", "resources", "canonical_resources", "fence", "expires_at", "state", "created_at", "updated_at", "root_id", "expired", "native_writes_are_advisory"],
+  "additionalProperties": false,
+  "properties": {
+    "id": {"type": "string"}, "lease_id": {"type": "string"},
+    "actor": {"type": "string"}, "root_id": {"type": ["string", "null"], "description": "Null legacy records cannot authorize a mutation."},
+    "resources": {"type": "array", "minItems": 1, "maxItems": 64, "items": {"type": "string"}},
+    "canonical_resources": {"type": "array", "minItems": 1, "maxItems": 64, "items": {"type": "string"}},
+    "fence": {"type": "integer", "minimum": 1},
+    "expires_at": {"type": "number"}, "created_at": {"type": "number"}, "updated_at": {"type": "number"},
+    "state": {"enum": ["active", "released", "expired"]}, "expired": {"type": "boolean"},
+    "native_writes_are_advisory": {"const": true}
+  }
+}

@@ -1,2 +1,14 @@
-# Approved source and notice hashes must survive checkout on every OS.
-* -text
+* text=auto eol=lf
+*.sh text eol=lf
+*.yml text eol=lf
+*.py text eol=lf
+*.cjs text eol=lf
+*.json text eol=lf
+*.rs text eol=lf
+*.md text eol=lf
+*.toml text eol=lf
+*.lock text eol=lf
+*.patch text eol=lf
+*.woff2 -text
+*.pk8 -text
+/outputs/avalokita/app/public/assets/fonts/Pretendard-LICENSE.txt -text

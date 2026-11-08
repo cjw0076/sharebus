@@ -20,12 +20,15 @@ from typing import Callable
 import uuid
 
 from discovery import MANAGED_PROVIDERS, discover_native_sessions, resolve_executable
+from antigravity_acp import AntigravityACP
 
 
 BUS_TOOLS = (
     "sharebus_join", "sharebus_status", "sharebus_send", "sharebus_read",
     "sharebus_publish", "sharebus_copy", "sharebus_ask_user", "sharebus_peer",
 )
+AGY_MODELS = frozenset({"gemini-4-argon-low", "gemini-4-argon-medium", "gemini-4-argon-high",
+                        "gemini-3.8-flash-low", "gemini-3.8-flash-medium", "gemini-3.8-flash-high"})
 
 MAX_WIRE_BYTES = 1048576
 MAX_MESSAGES = 64
@@ -41,6 +44,8 @@ QUEUE_TIMEOUT = 0.5
 class NativeNeedsHuman(RuntimeError):
     """The native request has not been answered by a human."""
 
+    reason_code = "native_human_required"
+
 
 @dataclass(frozen=True)
 class TurnResult:
@@ -54,6 +59,7 @@ class TurnResult:
     accepted: bool = False
     delivery_unknown: bool = False
     status: str = "not_sent"
+    reason_code: str | None = None
 
 
 class NativeAdapter:
@@ -114,6 +120,11 @@ class NativeAdapter:
         self._deadline: float | None = None
         self._approval_lock = threading.Lock()
         self._approval: dict | None = None
+        self._agy_model: str | None = None
+        self._acp = AntigravityACP(self, needs_human=NativeNeedsHuman,
+            allowed_models=AGY_MODELS,
+            max_messages=MAX_MESSAGES, max_output_chars=MAX_OUTPUT_CHARS,
+            max_approval_bytes=MAX_APPROVAL_BYTES, max_wire_bytes=MAX_WIRE_BYTES) if self.provider == "antigravity" else None
         self._logs = self._checked_directory(".sharebus", "private", "logs")
 
     def _check_workspace(self) -> None:
@@ -167,6 +178,8 @@ class NativeAdapter:
 
     @property
     def pid(self) -> int | None:
+        if self.provider == "antigravity":
+            return self._acp.pid
         return self._process.pid if self._process and self._process.poll() is None else None
 
     def _emit(self, event: dict, *, required: bool = False) -> None:
@@ -193,7 +206,9 @@ class NativeAdapter:
                 self.on_event(public)
             except Exception:
                 if required:
-                    raise RuntimeError("Native lifecycle receipt could not be recorded.") from None
+                    error = RuntimeError("Native lifecycle receipt could not be recorded.")
+                    error.reason_code = "native_observer_failed"
+                    raise error from None
 
     def _accepted_turn(self, turn_id: object = None) -> None:
         previous_turn = self._turn_id
@@ -210,7 +225,8 @@ class NativeAdapter:
                         "session_id": self.session_id, "turn_id": self._turn_id}, required=True)
 
     def _result(self, text: str, success: bool, error: str | None = None,
-                *, status: str | None = None, unknown: bool = False) -> TurnResult:
+                *, status: str | None = None, unknown: bool = False,
+                reason_code: str | None = None) -> TurnResult:
         if len(text) > MAX_OUTPUT_CHARS:
             raise RuntimeError("Native public output exceeded its size limit.")
         self._delivery_unknown = self._delivery_unknown or unknown
@@ -221,7 +237,8 @@ class NativeAdapter:
         self._emit({"type": "status", "session_id": self.session_id,
                     "turn_id": self._turn_id, "status": state})
         return TurnResult(text, self.session_id, success, self._needs_human, error,
-                          self._turn_id, self._input_attempted, self._accepted, unknown, state)
+                          self._turn_id, self._input_attempted, self._accepted, unknown, state,
+                          reason_code)
 
     def _remember_session(self, value: object) -> None:
         if not isinstance(value, str) or not value or len(value) > 256:
@@ -288,15 +305,17 @@ class NativeAdapter:
                 self._expected_session = str(uuid.uuid4())
                 command.extend(["--session-id", self._expected_session])
             return command
-        self._antigravity_mcp(server_args)
-        command = [
-            executable, "--input-format", "stream-json", "--output-format", "stream-json",
-        ]
-        if not native_tools:
-            command.append("--disable-slash-commands")
-        if resume_id:
-            command.extend(["--conversation", resume_id])
-        return command
+        from policy import load_team
+        profile = load_team(self.workspace, workspace_guard=self._check_workspace)["providers"].get("antigravity", {}).get("main", {})
+        model = profile.get("model_id")
+        if model is not None:
+            # Exact Gemini IDs verified in the local native catalog.
+            if model not in AGY_MODELS:
+                raise NativeNeedsHuman("Requested AGY model is outside the verified Gemini catalog; no fallback.")
+            if profile.get("effort") not in {None, model.rsplit("-", 1)[-1]}:
+                raise NativeNeedsHuman("Requested AGY effort conflicts with the exact model suffix; no fallback.")
+        self._agy_model = model
+        return [executable, "acp"]
 
     def _wire_event(self, value: dict) -> dict | None:
         """Keep only protocol frames needed in bounded, transient transport RAM."""
@@ -327,11 +346,7 @@ class NativeAdapter:
                         if block.get("type") == "tool_result"]
                 return selected
             return None
-        if kind == "step_update":
-            data = value.get("step_update") or {}
-            return {"event": kind, "step_update": {key: data[key] for key in
-                    ("conversation_id", "turn_id") if key in data}}
-        return value if kind in {"result", "error"} else None
+        return None
 
     def _reader(self, process: subprocess.Popen, messages: queue.Queue, stream,
                 parse: bool, state: dict) -> None:
@@ -428,7 +443,12 @@ class NativeAdapter:
         self._messages = queue.Queue(maxsize=MAX_MESSAGES)
         self._reader_state = {}
         self._pending.clear()
-        command = self._command(resume_id)
+        try:
+            command = self._command(resume_id)
+        except (RuntimeError, OSError, ValueError) as error:
+            if not isinstance(error, NativeNeedsHuman):
+                error.reason_code = "native_command_failed"
+            raise
         # Native clients keep their own subscription authentication. Never
         # select an API-key/cloud-billing route inherited from another harness.
         api_variables = {
@@ -439,11 +459,18 @@ class NativeAdapter:
             "CODEX_THREAD_ID", "CLAUDE_CODE_SESSION_ID",
         }
         environment = {name: value for name, value in os.environ.items()
-                       if not self.subscription_only or name.upper() not in api_variables}
+                       if name.upper() not in {"CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT"}
+                       and (not self.subscription_only or name.upper() not in api_variables)}
         environment.update({
             "SHAREBUS_MANAGED": "1", "SHAREBUS_WORKSPACE": str(self.workspace),
             "SHAREBUS_AGENT_ID": self.agent_id, "SHAREBUS_AGENT_TOKEN_FILE": str(self.token_file),
         })
+        if self.provider == "antigravity":
+            try:
+                return self._acp.start(command, environment, resume_id, self._agy_model)
+            except Exception:
+                self.close()
+                raise
         if self.provider == "claude":
             self._check_subscription(command[0], environment)
         self._process = subprocess.Popen(
@@ -580,6 +607,8 @@ class NativeAdapter:
         """Queue a real human's exact response, once, for the waiting request."""
         if not isinstance(result, dict) or len(json.dumps(result, ensure_ascii=False).encode("utf-8")) > MAX_APPROVAL_BYTES:
             raise ValueError("Invalid native approval response.")
+        if self.provider == "antigravity":
+            return self._acp.respond_approval(approval_id, result)
         with self._approval_lock:
             approval = self._approval
             if not approval or approval["view"]["approval_id"] != approval_id or approval["ready"].is_set():
@@ -752,12 +781,13 @@ class NativeAdapter:
             raise ValueError("Timeout must be finite and within the native turn limit.")
         if not self._turn_lock.acquire(blocking=False):
             return TurnResult("", self.session_id, False, True,
-                              "The native session already has an active input.", status="not_sent")
+                              "The native session already has an active input.", status="not_sent",
+                              reason_code="native_not_sent")
         try:
             if self._delivery_unknown:
                 return TurnResult("", self.session_id, False, True,
                     "An earlier native input has an unknown outcome; reconcile it before sending again.",
-                    delivery_unknown=True, status="delivery_unknown")
+                    delivery_unknown=True, status="delivery_unknown", reason_code="native_transport_unknown")
             self._interrupted.clear()
             self._needs_human = False
             self._input_attempted = False
@@ -772,9 +802,12 @@ class NativeAdapter:
                     self._check_subscription()
                 if self.provider == "codex":
                     return self._codex_turn(prompt, timeout)
+                if self.provider == "antigravity":
+                    return self._acp.turn(prompt, timeout)
                 return self._stream_turn(prompt, timeout)
             except (RuntimeError, OSError, TimeoutError, InterruptedError) as error:
                 interrupted = isinstance(error, InterruptedError)
+                permission_required = self._needs_human
                 if not interrupted:
                     self.close()
                 unknown = self._input_attempted and not self._input_rejected
@@ -785,7 +818,11 @@ class NativeAdapter:
                     "Native turn was interrupted." if interrupted else "Native client response timed out."
                     if isinstance(error, TimeoutError) else "Native transport could not complete the request.")
                 state = "needs_human" if isinstance(error, NativeNeedsHuman) else "delivery_unknown" if unknown else "not_sent"
-                return self._result("", False, reason, status=state, unknown=unknown)
+                code = getattr(error, "reason_code", None)
+                if code not in ("native_human_required", "native_command_failed", "native_observer_failed"):
+                    code = "native_permission_required" if permission_required else "native_transport_unknown" if unknown else "native_not_sent"
+                return self._result("", False, reason, status=state, unknown=unknown,
+                    reason_code=code)
             finally:
                 self._turn_id = None
                 self._deadline = None
@@ -827,59 +864,41 @@ class NativeAdapter:
                 text = "\n".join((messages or deltas).values())
                 success = status == "completed" and not self._needs_human
                 return self._result(text, success,
-                    None if success else ("Native tool permission requires human review." if self._needs_human else "Codex did not complete the turn successfully."))
+                    None if success else ("Native tool permission requires human review." if self._needs_human else "Codex did not complete the turn successfully."),
+                    reason_code=None if success else "native_permission_required" if self._needs_human else "native_result_failed")
             if (len(messages) > MAX_MESSAGES or len(deltas) > MAX_MESSAGES
                     or sum(map(len, messages.values())) > MAX_OUTPUT_CHARS
                     or sum(map(len, deltas.values())) > MAX_OUTPUT_CHARS):
                 raise RuntimeError("Native public output exceeded its size limit.")
 
     def _stream_turn(self, prompt: str, timeout: float) -> TurnResult:
-        if self.provider == "claude":
-            self._write({"type": "user", "message": {"role": "user", "content": prompt},
-                         "parent_tool_use_id": None}, input_attempt=True)
-        else:
-            self._write({"event": "user", "message": {"content": prompt}}, input_attempt=True)
+        self._write({"type": "user", "message": {"role": "user", "content": prompt},
+                     "parent_tool_use_id": None}, input_attempt=True)
         deadline = self._deadline or time.monotonic() + timeout
         text_parts: list[str] = []
         while True:
             event = self._next(deadline)
             kind = event.get("type", event.get("event"))
-            if self.provider == "claude":
-                if event.get("session_id"):
-                    self._remember_session(event["session_id"])
-                if kind in {"user", "assistant", "control_request", "result"} and self.session_id:
-                    self._accepted_turn(event.get("turn_id"))
-                if kind == "assistant" and event.get("parent_tool_use_id") is None:
-                    for block in (event.get("message") or {}).get("content", []):
-                        if isinstance(block, dict) and block.get("type") == "text" and isinstance(block.get("text"), str):
-                            text_parts.append(block["text"])
-                if kind == "control_request":
-                    self._approval_request(event, deadline)
-                if kind == "result":
-                    denied = bool(event.get("permission_denials")) or self._needs_human
-                    success = bool(self.session_id) and not event.get("is_error") and event.get("subtype", "success") == "success" and not denied
-                    final_text = event.get("result")
-                    text = final_text if isinstance(final_text, str) else "\n".join(text_parts)
-                    self._needs_human = denied
-                    return self._result(text, success,
-                        None if success else ("Native tool permission requires human review." if denied else "Claude did not complete the turn successfully."))
-            else:
-                data = event.get("step_update") or {}
-                if data.get("conversation_id"):
-                    self._remember_session(data["conversation_id"])
-                    self._accepted_turn(data.get("turn_id"))
-                if kind == "result":
-                    result = event.get("result") or {}
-                    if result.get("conversation_id"):
-                        self._remember_session(result["conversation_id"])
-                        self._accepted_turn(result.get("turn_id"))
-                    denied = bool(result.get("denied_actions"))
-                    success = bool(self.session_id) and str(result.get("status", "")).upper() == "SUCCESS" and not denied
-                    response = result.get("response")
-                    text = response if isinstance(response, str) else ""
-                    self._needs_human = denied
-                    return self._result(text, success,
-                        None if success else ("Native tool permission requires human review." if denied else "Antigravity did not complete the turn successfully."))
+            if event.get("session_id"):
+                self._remember_session(event["session_id"])
+            if kind in {"user", "assistant", "control_request", "result"} and self.session_id:
+                self._accepted_turn(event.get("turn_id"))
+            if kind == "assistant" and event.get("parent_tool_use_id") is None:
+                for block in (event.get("message") or {}).get("content", []):
+                    if isinstance(block, dict) and block.get("type") == "text" and isinstance(block.get("text"), str):
+                        text_parts.append(block["text"])
+            if kind == "control_request":
+                self._approval_request(event, deadline)
+            if kind == "result":
+                denied = bool(event.get("permission_denials")) or self._needs_human
+                success = bool(self.session_id) and not event.get("is_error") and event.get("subtype", "success") == "success" and not denied
+                final_text = event.get("result")
+                text = final_text if isinstance(final_text, str) else "\n".join(text_parts)
+                self._needs_human = denied
+                return self._result(text, success,
+                    None if success else ("Native tool permission requires human review." if denied else "Claude did not complete the turn successfully."),
+                    reason_code=None if success else "native_denied" if event.get("permission_denials")
+                    else "native_permission_required" if denied else "native_result_failed")
             if len(text_parts) > MAX_MESSAGES or sum(map(len, text_parts)) > MAX_OUTPUT_CHARS:
                 raise RuntimeError("Native public output exceeded its size limit.")
             if kind == "error":
@@ -887,6 +906,11 @@ class NativeAdapter:
 
     def interrupt(self) -> None:
         """Interrupt only this adapter's owned child; preserve the native ID."""
+        if self.provider == "antigravity":
+            try:
+                self._acp.cancel()
+            except (OSError, RuntimeError):
+                pass
         self._interrupted.set()
         if self.provider == "codex" and self.session_id and self._turn_id and self.pid:
             try:
@@ -899,6 +923,8 @@ class NativeAdapter:
 
     def close(self) -> None:
         """Close stdin first so native tools can clean up their own MCP children."""
+        if self.provider == "antigravity":
+            return self._acp.close()
         process = self._process
         if not process:
             return

@@ -1,0 +1,114 @@
+{
+  "schema": "avalokita-release-policy/1",
+  "version": "0.2.0-alpha.1",
+  "version_status": "proposed-unfrozen",
+  "channel": "alpha",
+  "public_publish": false,
+  "backend_strategy": "bundled-standalone-interpreter",
+  "reason": {
+    "version": "0.12.11",
+    "repository": "https://github.com/reason-machines/reason-network",
+    "revision": "b3557ff454cd26a04c2a18804ba83ae5db8b119d",
+    "patches": [
+      {
+        "path": "patches/reason-network-native-837f989.patch",
+        "sha256": "bc40709abdb00286b9f2880ace13e2a4b1c87dfaf1527ab164bf848933dfa7ac"
+      },
+      {
+        "path": "patches/reason-network-queue-cdc4da74.patch",
+        "sha256": "6088d8a269891809f8fd28d62e4c27d02a6d50bc3d1190f489d095947db2f832"
+      }
+    ],
+    "auto_update": false,
+    "fork_revision": "cdc4da74ef522fcaa3cc59c090b401c1fd547762",
+    "fork_tree": "f403a286e5592bed2f565ab1e2193acb00771958",
+    "source_lock": "packaging/reason-source-lock.json"
+  },
+  "toolchain_candidates": {
+    "node": "24.14.0",
+    "python": "3.13.17",
+    "rust": "1.93.1",
+    "pyinstaller": "6.22.3",
+    "mcp": "1.30.0",
+    "note": "Observed/primary-doc candidate pins, not a freshness or compatibility claim. Freeze supported patch versions and per-platform hash locks after integration."
+  },
+  "platforms": [
+    {
+      "id": "win-x64",
+      "os": "win32",
+      "arch": "x64",
+      "runner": "windows-2022",
+      "rust_target": "x86_64-pc-windows-msvc",
+      "formats": [
+        "portable",
+        "nsis"
+      ]
+    },
+    {
+      "id": "mac-arm64",
+      "os": "darwin",
+      "arch": "arm64",
+      "runner": "macos-15",
+      "rust_target": "aarch64-apple-darwin",
+      "formats": [
+        "dmg",
+        "zip"
+      ]
+    },
+    {
+      "id": "mac-x64",
+      "os": "darwin",
+      "arch": "x64",
+      "runner": "macos-15-intel",
+      "rust_target": "x86_64-apple-darwin",
+      "formats": [
+        "dmg",
+        "zip"
+      ]
+    },
+    {
+      "id": "linux-x64",
+      "os": "linux",
+      "arch": "x64",
+      "runner": "ubuntu-24.04",
+      "rust_target": "x86_64-unknown-linux-gnu",
+      "formats": [
+        "AppImage",
+        "tar.gz"
+      ]
+    }
+  ],
+  "build_gates": {
+    "portable_backend_launcher_integrated": false,
+    "bundled_mcp_and_guard_paths_verified": false,
+    "relocated_native_extension_imports_verified": false,
+    "runtime_archives_and_licenses_frozen": false,
+    "per_platform_python_hash_locks_frozen": false,
+    "reviewed_source_and_asset_allowlist_frozen": false
+  },
+  "release_gates": {
+    "version_and_source_revision_frozen": false,
+    "existing_claude_codex_roundtrip_verified": false,
+    "antigravity_exact_session_verified": false,
+    "human_ingress_and_harmonize_verified": false,
+    "supported_platform_package_smoke_verified": false,
+    "public_source_licenses_and_notices_reviewed": false,
+    "usefulness_trial_and_limitations_published": false,
+    "signature_status_and_install_flow_documented": false
+  },
+  "stable_release_gates": {
+    "windows_publisher_signature_verified": false,
+    "macos_developer_id_and_notarization_verified": false
+  },
+  "signing": {
+    "prerelease_allows_unsigned": true,
+    "stable_requires_publisher_signatures": true,
+    "platform_status": {
+      "win-x64": "unverified",
+      "mac-arm64": "unverified",
+      "mac-x64": "unverified",
+      "linux-x64": "unverified"
+    },
+    "note": "Unsigned or ad-hoc alpha may be released after status disclosure, official per-app install flow, checksums/attestations and actual package/native acceptance. Signed stable requires Windows publisher signature and macOS Developer ID/notarization. No global OS protection bypass."
+  }
+}

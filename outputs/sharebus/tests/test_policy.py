@@ -63,7 +63,10 @@ class PolicyTests(unittest.TestCase):
     def test_load_defaults_read_only_and_custom_provider_roles_are_editable(self):
         first = policy.load_team(self.root)
         self.assertFalse((self.root / ".sharebus").exists())
-        self.assertTrue(all(row["model_id"] is None for rows in first["providers"].values() for row in rows.values()))
+        self.assertEqual(first["providers"]["antigravity"]["main"]["model_id"], "gemini-4-argon-high")
+        self.assertEqual(first["providers"]["antigravity"]["main"]["effort"], "high")
+        self.assertTrue(all(row["model_id"] is None for provider, rows in first["providers"].items()
+                            for name, row in rows.items() if (provider, name) != ("antigravity", "main")))
         first["roles"]["CEO"] = {"label": "기존 최고경영자", "preferred_provider": "codex"}
         first["roles"]["ideation"]["preferred_provider"] = "claude"
         first["providers"]["custom_host"] = copy.deepcopy(first["providers"]["codex"])

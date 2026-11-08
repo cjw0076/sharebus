@@ -345,7 +345,7 @@ def trusted_transport_binding(thread_id: str | None, session_id: str | None,
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Use the current native session's private Sharebus context")
-    parser.add_argument("command", choices=("connect", "status", "read", "send", "publish", "ack"))
+    parser.add_argument("command", choices=("connect", "status", "read", "receive", "send", "publish", "ack"))
     parser.add_argument("--context-file", required=True, type=Path)
     parser.add_argument("--provider", choices=tuple(_EVENTS))
     parser.add_argument("--workspace", type=Path)
@@ -363,6 +363,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--request-timeout", type=float, default=3.0)
     args = parser.parse_args(argv)
     try:
+        if args.command in {"read", "receive"} and args.after < 0:
+            raise BusError("Sharebus cursor must be nonnegative")
         correlation = (args.job_id, args.event_id, args.native_session_id)
         completing = args.command == "send" and any(value is not None for value in correlation)
         if completing and (not all(correlation) or args.to != "user" or args.kind != "result"):
@@ -381,8 +383,9 @@ def main(argv: list[str] | None = None) -> int:
             result = {"connected": True, **{key: binding[key] for key in ("agent_id", "provider", "native_session_id", "workspace")}}
         elif args.command == "status":
             result = _request(root, "/api/state", token, deadline=deadline)
-        elif args.command == "read":
-            result = _request(root, "/api/agent/inbox", token, {"after": args.after}, deadline=deadline)
+        elif args.command in {"read", "receive"}:
+            result = _request(root, "/api/agent/inbox", token,
+                              {"after": args.after, "ack": [], "claim": args.command == "receive"}, deadline=deadline)
         elif args.command == "send":
             if completing:
                 result = _request(root, "/api/native/result", token, {"job_id": args.job_id, "event_id": args.event_id,

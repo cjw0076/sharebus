@@ -1,0 +1,35 @@
+{
+  "name": "agent-client-protocol",
+  "version": "0.12.1",
+  "wheel": "agent_client_protocol-0.12.1-py3-none-any.whl",
+  "sha256": "aaf3cc301ed87d9e2c4ccb91adfe1cd58784355f6ce7e513f50e7ca2391862ef",
+  "url": "https://files.pythonhosted.org/packages/21/61/0a2186c8ca53cf464767d4c4fb7fd9e23f48ce4547c2fa0d1c83a4d52410/agent_client_protocol-0.12.1-py3-none-any.whl",
+  "requires_python": ">=3.10,<3.15",
+  "requires_dist": [
+    "pydantic>=2.7"
+  ],
+  "selected_extras": [],
+  "reused_dependencies": {
+    "pydantic": "2.14.1",
+    "pydantic_core": "2.50.1",
+    "typing_extensions": "4.16.0"
+  },
+  "license": "Apache-2.0",
+  "license_file": "python/Lib/site-packages/agent_client_protocol-0.12.1.dist-info/licenses/LICENSE",
+  "license_sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30",
+  "source_repository": "https://github.com/agentclientprotocol/python-sdk",
+  "source_tag": "0.12.1",
+  "source_commit": "e668ed9e0034f5076749a6d74c5cec40ab610010",
+  "source_check": "wheel acp/schema.py and Apache license match the pinned source commit",
+  "pypi_attestation_available": false,
+  "reproducible_build_verified": false,
+  "preserved_base_dependency_lock_sha256": "645547e2d70db78a596ee227a5764ff5c06bcb170b89587e35df1735b5920f7c",
+  "distribution_changes": {
+    "added": [
+      "agent-client-protocol==0.12.1"
+    ],
+    "upgraded": [],
+    "removed": []
+  },
+  "native_inputs": 0
+}

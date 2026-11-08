@@ -22,7 +22,7 @@ from typing import Any
 
 from discovery import resolve_executable
 from mcp_server import BusClient, _read_private
-from native_bridge import NativeDeliveryResult, NeedsNativeAttach
+from native_bridge import NativeDeliveryResult, NeedsNativeAttach, _dispatch_binding, reserve_native_dispatch
 
 CHANNEL = Path(".sharebus/private/codex-bridge")
 _UUID = r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"
@@ -177,6 +177,8 @@ class CodexAttachedAdapter:
                     and math.isfinite(job["root_deadline"]) and job["root_deadline"] > time.time()]
             if len(jobs) != 1:
                 raise NeedsNativeAttach("Codex delivery requires one exact active owned job, event, and unexpired human root.")
+            runtime = {**runtime, "dispatch_binding": _dispatch_binding(runtime, own,
+                       job_id=job_id, event_id=event_id, root_id=root_id)}
         self._runtime_identity = identity
         return runtime
 
@@ -218,6 +220,7 @@ class CodexAttachedAdapter:
             record: dict[str, Any] = {"version": 1, "agent_id": self.agent_id, "native_session_id": self.session_id,
                 "workspace_id": runtime["workspace_id"], "runtime_nonce": runtime["nonce"], "event_id": event_id,
                 "job_id": job_id, "root_id": root_id, "prompt_sha256": hashlib.sha256(body.encode("utf-8")).hexdigest(),
+                "dispatch_binding": runtime["dispatch_binding"],
                 "cli_version": self._version, "status": "dispatch_outcome_unknown", "created_at": time.time()}
             path = self.workspace / CHANNEL / (job_id + ".json")
             try:
@@ -227,13 +230,14 @@ class CodexAttachedAdapter:
             except FileExistsError:
                 prior = _read_private(path, self.workspace, json_file=True)
                 if not isinstance(prior, dict) or any(prior.get(key) != record[key] for key in
-                        ("agent_id", "native_session_id", "workspace_id", "runtime_nonce", "event_id", "job_id", "root_id", "prompt_sha256")):
+                        ("agent_id", "native_session_id", "workspace_id", "runtime_nonce", "event_id", "job_id", "root_id", "prompt_sha256", "dispatch_binding")):
                     raise NeedsNativeAttach("A queued Codex job cannot be changed or replayed.")
                 return self._result(prior)
             try:
                 self._target(self.session_id, event_id=event_id, job_id=job_id, root_id=root_id)
                 if self._interrupted.is_set() or self._closed.is_set():
                     raise InterruptedError
+                reserve_native_dispatch(self.workspace, "codex", record["dispatch_binding"])
                 result = subprocess.run(command, capture_output=True, text=True, encoding="utf-8", errors="replace",
                     timeout=timeout, check=False, shell=False, stdin=subprocess.DEVNULL, cwd=str(self.workspace),
                     creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))

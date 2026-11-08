@@ -1,0 +1,763 @@
+diff --git a/AVALOKITA-CHANGES.md b/AVALOKITA-CHANGES.md
+new file mode 100644
+index 0000000000000000000000000000000000000000..6bcefc905977b33367f7218bb51dc781bda56a0a
+--- /dev/null
++++ b/AVALOKITA-CHANGES.md
+@@ -0,0 +1,15 @@
++# Avalokita local delivery additions
++
++Base: Reason Network 0.12.11, commit `b3557ff454cd26a04c2a18804ba83ae5db8b119d`.
++Original source, LICENSE-MIT, LICENSE-APACHE and NOTICE are retained unchanged.
++
++Changes made on 2026-10-24:
++
++- Added the private `avalokita-deliver` stdio command before migration/setup/daemon initialization.
++- Reused Claude Code's native socket framing behind a pre-input authorization callback.
++- Added exact selected Claude registry / Codex session metadata and executable-pin checks.
++- Added a durable, one-attempt native boundary with no queue/hook/network fallback or automatic replay.
++- Kept native input submission separate from a verified model response or completed goal.
++
++This command does not use or claim integration of the upstream team directory,
++network daemon, MCP server, remote transport, installer, sign-in, or auto-updater.
+diff --git a/src/agent.rs b/src/agent.rs
+index 4ac44bc54e00f7d9775b8793e6d3fcdd1bfaaf9c..ca2ef3b51099f17bbd1944ae231a51295228c9dd 100644
+--- a/src/agent.rs
++++ b/src/agent.rs
+@@ -341,10 +341,21 @@ fn socket_of(
+ }
+ 
+ pub fn post_to_claude(sock: &ClaudeSocket, text: &str) -> std::io::Result<()> {
++    post_to_claude_guarded(sock, text, || Ok(()))
++}
++
++/// Avalokita rechecks its exact binding and durable authority after opening/authenticating the socket,
++/// immediately before the first user-frame byte. The ordinary network delivery path is unchanged.
++pub fn post_to_claude_guarded(
++    sock: &ClaudeSocket,
++    text: &str,
++    before_input: impl FnOnce() -> std::io::Result<()>,
++) -> std::io::Result<()> {
+     let mut c = open_inbox(&sock.path)?;
+     if let Some(t) = &sock.token {
+         writeln!(c, "{}", json!({ "type": "auth", "token": t }))?;
+     }
++    before_input()?;
+     writeln!(c, "{}", json!({ "type": "user", "message": { "role": "user", "content": text } }))?;
+     c.flush()
+ }
+diff --git a/src/avalokita.rs b/src/avalokita.rs
+new file mode 100644
+index 0000000000000000000000000000000000000000..d91e1a0b5aac76fafeaff69acbc3722818329e30
+--- /dev/null
++++ b/src/avalokita.rs
+@@ -0,0 +1,668 @@
++//! Avalokita's bounded local native-delivery surface. This deliberately bypasses the network daemon's
++//! address guessing, mail retention, hooks, and at-least-once fallback. It does not configure agents.
++use crate::{agent, util};
++use anyhow::Result;
++use rusqlite::{Connection, OptionalExtension, params};
++use serde::{Deserialize, Serialize};
++use serde_json::{Value, json};
++use std::{
++    fs,
++    io::{self, BufRead, BufReader, Read, Write},
++    path::{Path, PathBuf},
++    process::Stdio,
++    time::Duration,
++};
++
++const CONTRACT: &str = "avalokita.reason/1";
++const MAX_LINE: u64 = 96 * 1024;
++
++#[derive(Clone, Deserialize, Serialize)]
++#[serde(deny_unknown_fields)]
++pub struct Binding {
++    provider: String,
++    native_id: String,
++    workspace: PathBuf,
++    #[serde(default)]
++    registry_path: Option<PathBuf>,
++    #[serde(default)]
++    pid: Option<u32>,
++    #[serde(default)]
++    started_at_ms: Option<i64>,
++    #[serde(default)]
++    socket_path: Option<PathBuf>,
++    #[serde(default)]
++    rollout_path: Option<PathBuf>,
++    #[serde(default)]
++    executable: Option<PathBuf>,
++    #[serde(default)]
++    executable_sha256: Option<String>,
++}
++
++#[derive(Deserialize, Serialize)]
++#[serde(deny_unknown_fields)]
++pub struct Request {
++    contract: String,
++    dispatch_id: String,
++    source_actor_id: String,
++    target_actor_id: String,
++    root_id: String,
++    authorization_sha256: String,
++    deadline_unix_ms: i64,
++    operation_timeout_ms: u64,
++    ledger_path: PathBuf,
++    binding: Binding,
++    prompt: String,
++}
++
++#[derive(Deserialize)]
++#[serde(deny_unknown_fields)]
++struct Commit {
++    contract: String,
++    dispatch_id: String,
++    request_sha256: String,
++    authorize: bool,
++}
++
++fn fail(code: &'static str) -> io::Error {
++    io::Error::other(code)
++}
++
++fn sha256(bytes: &[u8]) -> String {
++    ring::digest::digest(&ring::digest::SHA256, bytes).as_ref().iter().map(|b| format!("{b:02x}")).collect()
++}
++
++fn line<T: serde::de::DeserializeOwned>(input: &mut impl BufRead) -> io::Result<T> {
++    let mut bytes = Vec::new();
++    input.take(MAX_LINE + 1).read_until(b'\n', &mut bytes)?;
++    if bytes.len() as u64 > MAX_LINE || !bytes.ends_with(b"\n") {
++        return Err(fail("invalid_frame"));
++    }
++    serde_json::from_slice(&bytes).map_err(|_| fail("invalid_frame"))
++}
++
++fn emit(value: &Value) -> io::Result<()> {
++    let mut output = io::stdout().lock();
++    serde_json::to_writer(&mut output, value).map_err(|_| fail("protocol_unavailable"))?;
++    output.write_all(b"\n")?;
++    output.flush()
++}
++
++/// No symlink/reparse path may redirect the selected workspace, metadata, executable, or private ledger.
++fn plain(path: &Path, file: bool) -> io::Result<()> {
++    if !path.is_absolute() {
++        return Err(fail("invalid_path"));
++    }
++    for part in path.ancestors() {
++        let metadata = match fs::symlink_metadata(part) {
++            Ok(m) => m,
++            Err(e) if part == path && !file && e.kind() == io::ErrorKind::NotFound => continue,
++            Err(_) => return Err(fail("binding_unavailable")),
++        };
++        #[cfg(windows)]
++        let linked = {
++            use std::os::windows::fs::MetadataExt;
++            metadata.file_attributes() & 0x400 != 0
++        };
++        #[cfg(not(windows))]
++        let linked = metadata.file_type().is_symlink();
++        if linked {
++            return Err(fail("linked_path"));
++        }
++        if part == path && file && !metadata.is_file() {
++            return Err(fail("invalid_path"));
++        }
++    }
++    Ok(())
++}
++
++fn same_directory(left: &Path, right: &Path) -> io::Result<bool> {
++    plain(left, false)?;
++    plain(right, false)?;
++    Ok(left.canonicalize().map_err(|_| fail("binding_unavailable"))?
++        == right.canonicalize().map_err(|_| fail("binding_unavailable"))?)
++}
++
++fn metadata(path: &Path, first_line: bool) -> io::Result<Value> {
++    plain(path, true)?;
++    let mut file = BufReader::new(fs::File::open(path)?);
++    let mut bytes = Vec::new();
++    if first_line {
++        file.by_ref().take(MAX_LINE + 1).read_until(b'\n', &mut bytes)?;
++    } else {
++        file.take(MAX_LINE + 1).read_to_end(&mut bytes)?;
++    }
++    if bytes.len() as u64 > MAX_LINE {
++        return Err(fail("metadata_limit"));
++    }
++    serde_json::from_slice(&bytes).map_err(|_| fail("invalid_metadata"))
++}
++
++fn exact_binding(binding: &Binding) -> io::Result<()> {
++    if binding.native_id.is_empty()
++        || binding.native_id.len() > 200
++        || !same_directory(&binding.workspace, &std::env::current_dir()?)?
++    {
++        return Err(fail("binding_mismatch"));
++    }
++    match binding.provider.as_str() {
++        "claude-code" => {
++            let path = binding.registry_path.as_deref().ok_or_else(|| fail("invalid_binding"))?;
++            let pid = binding.pid.filter(|p| *p > 0).ok_or_else(|| fail("invalid_binding"))?;
++            if path.file_name().and_then(|s| s.to_str()) != Some(&format!("{pid}.json")) {
++                return Err(fail("binding_mismatch"));
++            }
++            let value = metadata(path, false)?;
++            let socket = binding.socket_path.as_deref().ok_or_else(|| fail("invalid_binding"))?;
++            let cwd = value["cwd"].as_str().ok_or_else(|| fail("binding_mismatch"))?;
++            if value["pid"].as_u64() != Some(pid as u64)
++                || !util::pid_alive(pid)
++                || value["sessionId"].as_str() != Some(&binding.native_id)
++                || value["startedAt"].as_i64() != binding.started_at_ms
++                || value["messagingSocketPath"].as_str().map(Path::new) != Some(socket)
++                || !same_directory(Path::new(cwd), &binding.workspace)?
++            {
++                return Err(fail("binding_mismatch"));
++            }
++            #[cfg(windows)]
++            if !socket.to_string_lossy().starts_with(r"\\.\pipe\") {
++                return Err(fail("invalid_socket"));
++            }
++            #[cfg(unix)]
++            {
++                use std::os::unix::fs::FileTypeExt;
++                if !fs::symlink_metadata(socket)?.file_type().is_socket() {
++                    return Err(fail("invalid_socket"));
++                }
++            }
++        }
++        "codex" => {
++            let value = metadata(binding.rollout_path.as_deref().ok_or_else(|| fail("invalid_binding"))?, true)?;
++            let cwd = value["payload"]["cwd"].as_str().ok_or_else(|| fail("binding_mismatch"))?;
++            if value["type"] != "session_meta"
++                || value["payload"]["id"].as_str() != Some(&binding.native_id)
++                || !same_directory(Path::new(cwd), &binding.workspace)?
++            {
++                return Err(fail("binding_mismatch"));
++            }
++            let path = binding.executable.as_deref().ok_or_else(|| fail("invalid_binding"))?;
++            plain(path, true)?;
++            #[cfg(windows)]
++            if path.extension().and_then(|s| s.to_str()).is_none_or(|s| !s.eq_ignore_ascii_case("exe")) {
++                return Err(fail("invalid_executable"));
++            }
++            let mut context = ring::digest::Context::new(&ring::digest::SHA256);
++            let mut file = fs::File::open(path)?;
++            let mut buffer = [0; 65536];
++            loop {
++                let n = file.read(&mut buffer)?;
++                if n == 0 {
++                    break;
++                }
++                context.update(&buffer[..n]);
++            }
++            let digest: String = context.finish().as_ref().iter().map(|b| format!("{b:02x}")).collect();
++            if binding.executable_sha256.as_deref() != Some(&digest) {
++                return Err(fail("executable_pin_mismatch"));
++            }
++        }
++        _ => return Err(fail("unsupported_provider")),
++    }
++    Ok(())
++}
++
++fn database(path: &Path) -> io::Result<Connection> {
++    plain(path, false)?;
++    if path.exists() {
++        plain(path, true)?;
++    }
++    let db = Connection::open(path).map_err(|_| fail("ledger_unavailable"))?;
++    db.busy_timeout(Duration::from_secs(3)).map_err(|_| fail("ledger_unavailable"))?;
++    db.execute_batch("PRAGMA synchronous=FULL; CREATE TABLE IF NOT EXISTS avalokita_reason_attempts (
++        dispatch_id TEXT PRIMARY KEY, fingerprint TEXT NOT NULL, binding_key TEXT NOT NULL, state TEXT NOT NULL, receipt TEXT NOT NULL)")
++        .map_err(|_| fail("ledger_unavailable"))?;
++    Ok(db)
++}
++
++fn prior(request: &Request, hash: &str) -> io::Result<Option<Value>> {
++    let db = database(&request.ledger_path)?;
++    let row: Option<(String, String)> = db
++        .query_row(
++            "SELECT fingerprint,receipt FROM avalokita_reason_attempts WHERE dispatch_id=?1",
++            [&request.dispatch_id],
++            |r| Ok((r.get(0)?, r.get(1)?)),
++        )
++        .optional()
++        .map_err(|_| fail("ledger_unavailable"))?;
++    row.map(|(fingerprint, text)| {
++        if fingerprint != hash {
++            return Err(fail("dispatch_identity_reused"));
++        }
++        let mut receipt: Value = serde_json::from_str(&text).map_err(|_| fail("ledger_unavailable"))?;
++        receipt["duplicate_suppressed"] = json!(true);
++        Ok(receipt)
++    })
++    .transpose()
++}
++
++fn save(request: &Request, hash: &str, receipt: &Value, first: bool) -> io::Result<()> {
++    let mut db = database(&request.ledger_path)?;
++    let tx = db
++        .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
++        .map_err(|_| fail("ledger_unavailable"))?;
++    let binding_key = sha256(
++        &serde_json::to_vec(&(
++            &request.binding.provider,
++            &request.binding.native_id,
++            request.binding.workspace.canonicalize().map_err(|_| fail("binding_unavailable"))?,
++        ))
++        .map_err(|_| fail("invalid_binding"))?,
++    );
++    if first
++        && tx
++            .query_row(
++                "SELECT 1 FROM avalokita_reason_attempts WHERE binding_key=?1 AND state='delivery_unknown'",
++                [&binding_key],
++                |_| Ok(()),
++            )
++            .optional()
++            .map_err(|_| fail("ledger_unavailable"))?
++            .is_some()
++    {
++        return Err(fail("target_delivery_unknown"));
++    }
++    let changed = if first {
++        tx.execute(
++            "INSERT OR IGNORE INTO avalokita_reason_attempts VALUES (?1,?2,?3,?4,?5)",
++            params![request.dispatch_id, hash, binding_key, receipt["state"].as_str(), receipt.to_string()],
++        )
++    } else {
++        tx.execute(
++            "UPDATE avalokita_reason_attempts SET state=?3,receipt=?4 WHERE dispatch_id=?1 AND fingerprint=?2",
++            params![request.dispatch_id, hash, receipt["state"].as_str(), receipt.to_string()],
++        )
++    }
++    .map_err(|_| fail("ledger_unavailable"))?;
++    if changed != 1 {
++        return Err(fail("dispatch_already_attempted"));
++    }
++    tx.commit().map_err(|_| fail("ledger_unavailable"))?;
++    Ok(())
++}
++
++fn receipt(request: &Request) -> Value {
++    json!({"contract": CONTRACT, "type": "receipt", "dispatch_id": request.dispatch_id,
++        "root_id": request.root_id, "state": "not_sent", "native_input_attempted": false,
++        "transport_accepted": false, "native_accepted": false, "native_result_verified": false,
++        "automatic_retry": false, "fallback_attempted": false})
++}
++
++fn before_input(request: &Request, hash: &str, input: &mut impl BufRead, result: &mut Value) -> io::Result<()> {
++    emit(&json!({"contract": CONTRACT, "type": "ready", "dispatch_id": request.dispatch_id,
++        "root_id": request.root_id, "target_actor_id": request.target_actor_id,
++        "native_id": request.binding.native_id, "request_sha256": hash}))?;
++    let commit: Commit = line(input)?;
++    if commit.contract != CONTRACT
++        || commit.dispatch_id != request.dispatch_id
++        || commit.request_sha256 != hash
++        || !commit.authorize
++        || util::now_ms() >= request.deadline_unix_ms
++    {
++        return Err(fail("authorization_revoked"));
++    }
++    exact_binding(&request.binding)?;
++    if util::now_ms() >= request.deadline_unix_ms {
++        return Err(fail("authorization_revoked"));
++    }
++    // This FULL-synchronous commit precedes the first native user frame or queue process spawn.
++    let attempted = json!({"state": "delivery_unknown", "native_input_attempted": true});
++    let mut next = result.clone();
++    next.as_object_mut().unwrap().extend(attempted.as_object().unwrap().clone());
++    if let Err(error) = save(request, hash, &next, true) {
++        if error.to_string() == "dispatch_already_attempted" {
++            if let Some(saved) = prior(request, hash)? {
++                *result = saved;
++            }
++        }
++        return Err(error);
++    }
++    *result = next;
++    if util::now_ms() >= request.deadline_unix_ms {
++        return Err(fail("authorization_revoked"));
++    }
++    Ok(())
++}
++
++fn claude_token(binding: &Binding) -> io::Result<Option<String>> {
++    if !cfg!(windows) {
++        return Ok(None);
++    }
++    let parent = binding.registry_path.as_deref().and_then(Path::parent).ok_or_else(|| fail("invalid_binding"))?;
++    let prefix = format!("{}.", binding.pid.ok_or_else(|| fail("invalid_binding"))?);
++    let mut token = None;
++    for entry in fs::read_dir(parent)? {
++        let entry = entry?;
++        let name = entry.file_name().to_string_lossy().to_string();
++        if name.starts_with(&prefix) && name.ends_with(".key") {
++            if token.is_some() {
++                return Err(fail("ambiguous_native_token"));
++            }
++            let value = metadata(&entry.path(), false)?;
++            token = Some(
++                value["peerToken"]
++                    .as_str()
++                    .filter(|s| !s.is_empty())
++                    .ok_or_else(|| fail("native_token_unavailable"))?
++                    .to_owned(),
++            );
++        }
++    }
++    token.ok_or_else(|| fail("native_token_unavailable")).map(Some)
++}
++
++/// Microsoft CRT quoting used by Command: spaces/tabs quote an argument, quotes
++/// escape preceding backslashes, and trailing backslashes double before a quote.
++#[cfg(windows)]
++fn codex_command_line_units(binding: &Binding, prompt: &str) -> io::Result<usize> {
++    let exe = binding.executable.as_deref().and_then(Path::to_str).ok_or_else(|| fail("invalid_executable"))?;
++    let args = ["queue", "--thread", &binding.native_id, "--message", prompt];
++    if exe.contains('\0') || args.iter().any(|arg| arg.contains('\0')) {
++        return Err(fail("invalid_native_argument"));
++    }
++    // Rust always quotes argv[0]. The final NUL counts toward CreateProcessW's limit.
++    let mut total = 2 + exe.encode_utf16().count() + 1;
++    for arg in args {
++        let quoted = arg.is_empty() || arg.contains([' ', '\t']);
++        let mut units = if quoted { 2 } else { 0 };
++        let mut slashes = 0;
++        for unit in arg.encode_utf16() {
++            if unit == b'\\' as u16 {
++                slashes += 1;
++            } else if unit == b'"' as u16 {
++                units += 2 * slashes + 2;
++                slashes = 0;
++            } else {
++                units += slashes + 1;
++                slashes = 0;
++            }
++        }
++        units += slashes * if quoted { 2 } else { 1 };
++        total += 1 + units;
++    }
++    Ok(total)
++}
++
++async fn deliver(request: &Request, input: &mut impl BufRead, result: &mut Value) -> io::Result<()> {
++    if request.contract != CONTRACT
++        || request.prompt.is_empty()
++        || request.prompt.len() > 65536
++        || [&request.dispatch_id, &request.source_actor_id, &request.target_actor_id, &request.root_id]
++            .iter()
++            .any(|s| s.is_empty() || s.len() > 200)
++        || util::now_ms() >= request.deadline_unix_ms
++        || request.authorization_sha256.len() != 64
++        || !request.authorization_sha256.bytes().all(|b| b.is_ascii_hexdigit())
++        || request.operation_timeout_ms == 0
++        || request.operation_timeout_ms > 60000
++    {
++        return Err(fail("invalid_request"));
++    }
++    exact_binding(&request.binding)?;
++    let hash = sha256(&serde_json::to_vec(request).map_err(|_| fail("invalid_request"))?);
++    if let Some(saved) = prior(request, &hash)? {
++        *result = saved;
++        return Ok(());
++    }
++    match request.binding.provider.as_str() {
++        "claude-code" => {
++            let socket = agent::ClaudeSocket {
++                path: request.binding.socket_path.clone().unwrap(),
++                token: claude_token(&request.binding)?,
++            };
++            agent::post_to_claude_guarded(&socket, &request.prompt, || before_input(request, &hash, input, result))?;
++            result["transport"] = json!("claude_socket_written");
++        }
++        "codex" => {
++            #[cfg(windows)]
++            if codex_command_line_units(&request.binding, &request.prompt)? > 32767 {
++                return Err(fail("native_command_line_limit"));
++            }
++            before_input(request, &hash, input, result)?;
++            let mut command = tokio::process::Command::new(request.binding.executable.as_deref().unwrap());
++            command
++                .args(["queue", "--thread", &request.binding.native_id, "--message", &request.prompt])
++                .current_dir(&request.binding.workspace)
++                .stdin(Stdio::null())
++                .stdout(Stdio::null())
++                .stderr(Stdio::null())
++                .kill_on_drop(true);
++            let mut child = command.spawn().map_err(|_| fail("native_spawn_unavailable"))?;
++            // Leave time for the parent to read our receipt after we have killed/reaped a timed-out queue helper.
++            let milliseconds = (request.deadline_unix_ms - util::now_ms()).clamp(1, 30000) as u64;
++            let milliseconds = milliseconds.min(request.operation_timeout_ms.saturating_sub(2000).max(1));
++            match tokio::time::timeout(Duration::from_millis(milliseconds), child.wait()).await {
++                Ok(Ok(status)) if status.success() => result["transport"] = json!("codex_queue_accepted"),
++                Ok(Ok(_)) => return Err(fail("native_queue_uncertain")),
++                Ok(Err(_)) => return Err(fail("native_queue_uncertain")),
++                Err(_) => {
++                    let _ = child.kill().await;
++                    return Err(fail("native_timeout"));
++                }
++            }
++        }
++        _ => return Err(fail("unsupported_provider")),
++    }
++    result["state"] = json!("transport_accepted");
++    result["transport_accepted"] = json!(true);
++    save(request, &hash, result, false)
++}
++
++pub async fn run() -> Result<()> {
++    let mut input = BufReader::new(io::stdin());
++    let request: Request = match line(&mut input) {
++        Ok(value) => value,
++        Err(_) => {
++            emit(
++                &json!({"contract": CONTRACT, "type": "receipt", "state": "not_sent", "reason_code": "invalid_frame"}),
++            )?;
++            return Ok(());
++        }
++    };
++    let mut result = receipt(&request);
++    if let Err(error) = deliver(&request, &mut input, &mut result).await {
++        // Do not leak native stderr, paths, auth tokens, or the prompt into receipts.
++        let code = error.to_string();
++        result["reason_code"] = json!(if [
++            "binding_mismatch",
++            "authorization_revoked",
++            "executable_pin_mismatch",
++            "dispatch_identity_reused",
++            "dispatch_already_attempted",
++            "target_delivery_unknown",
++            "native_timeout",
++            "native_queue_uncertain",
++            "native_token_unavailable",
++            "ambiguous_native_token",
++            "native_spawn_unavailable",
++            "native_command_line_limit",
++            "invalid_native_argument"
++        ]
++        .contains(&code.as_str())
++        {
++            code.as_str()
++        } else {
++            "native_unavailable_or_uncertain"
++        });
++        if result["native_input_attempted"] == true {
++            result["state"] = json!("delivery_unknown");
++            result["transport_accepted"] = json!(false);
++            if let Ok(bytes) = serde_json::to_vec(&request) {
++                let _ = save(&request, &sha256(&bytes), &result, false);
++            }
++        }
++    }
++    emit(&result)?;
++    Ok(())
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++
++    struct Fixture {
++        directory: PathBuf,
++        request: Request,
++    }
++
++    impl Fixture {
++        fn new() -> Self {
++            let directory = std::env::temp_dir().join(format!("avalokita-reason-{}", ulid::Ulid::generate()));
++            fs::create_dir(&directory).unwrap();
++            let workspace = std::env::current_dir().unwrap();
++            let executable = directory.join("synthetic-codex.exe");
++            fs::write(&executable, b"not an executable; metadata tests never spawn it").unwrap();
++            let rollout = directory.join("selected.jsonl");
++            fs::write(
++                &rollout,
++                format!("{}\n", json!({"type":"session_meta", "payload":{"id":"exact-thread", "cwd":workspace}})),
++            )
++            .unwrap();
++            Self {
++                request: Request {
++                    contract: CONTRACT.into(),
++                    dispatch_id: "dispatch".into(),
++                    source_actor_id: "claude-ceo".into(),
++                    target_actor_id: "codex-design".into(),
++                    root_id: "human-root".into(),
++                    authorization_sha256: "a".repeat(64),
++                    deadline_unix_ms: util::now_ms() + 60000,
++                    operation_timeout_ms: 30000,
++                    ledger_path: directory.join("private.sqlite3"),
++                    prompt: "selected public task".into(),
++                    binding: Binding {
++                        provider: "codex".into(),
++                        native_id: "exact-thread".into(),
++                        workspace,
++                        registry_path: None,
++                        pid: None,
++                        started_at_ms: None,
++                        socket_path: None,
++                        rollout_path: Some(rollout),
++                        executable: Some(executable),
++                        executable_sha256: Some(sha256(b"not an executable; metadata tests never spawn it")),
++                    },
++                },
++                directory,
++            }
++        }
++        fn hash(&self) -> String {
++            sha256(&serde_json::to_vec(&self.request).unwrap())
++        }
++    }
++
++    impl Drop for Fixture {
++        fn drop(&mut self) {
++            // Every file was created by this fixture. No recursive deletion or native state paths.
++            for name in ["selected.jsonl", "synthetic-codex.exe", "private.sqlite3", "private.sqlite3-journal"] {
++                let _ = fs::remove_file(self.directory.join(name));
++            }
++            let _ = fs::remove_dir(&self.directory);
++        }
++    }
++
++    #[test]
++    fn exact_metadata_rejects_a_different_thread_and_executable_without_a_native_call() {
++        let fixture = Fixture::new();
++        exact_binding(&fixture.request.binding).unwrap();
++        let mut other = fixture.request.binding.clone();
++        other.native_id = "another-thread".into();
++        assert!(exact_binding(&other).is_err());
++        let mut other = fixture.request.binding.clone();
++        other.executable_sha256 = Some("0".repeat(64));
++        assert!(exact_binding(&other).is_err());
++    }
++
++    #[test]
++    fn identical_thread_metadata_from_another_workspace_is_not_attached() {
++        let fixture = Fixture::new();
++        fs::write(
++            fixture.request.binding.rollout_path.as_ref().unwrap(),
++            format!("{}\n", json!({"type":"session_meta", "payload":{"id":"exact-thread", "cwd":fixture.directory}})),
++        )
++        .unwrap();
++        assert!(exact_binding(&fixture.request.binding).is_err());
++    }
++
++    #[test]
++    fn a_durable_unknown_survives_reopen_and_cannot_be_reserved_under_a_fresh_root() {
++        let mut fixture = Fixture::new();
++        let mut unknown = receipt(&fixture.request);
++        unknown["state"] = json!("delivery_unknown");
++        unknown["native_input_attempted"] = json!(true);
++        save(&fixture.request, &fixture.hash(), &unknown, true).unwrap();
++        assert_eq!(prior(&fixture.request, &fixture.hash()).unwrap().unwrap()["state"], "delivery_unknown");
++        fixture.request.root_id = "fresh-human-root".into();
++        fixture.request.dispatch_id = "fresh-dispatch".into();
++        assert_eq!(
++            save(&fixture.request, &fixture.hash(), &unknown, true).unwrap_err().to_string(),
++            "target_delivery_unknown"
++        );
++    }
++
++    #[test]
++    fn changed_prompt_or_causal_authority_cannot_reuse_a_dispatch() {
++        let mut fixture = Fixture::new();
++        let initial_hash = fixture.hash();
++        save(&fixture.request, &initial_hash, &receipt(&fixture.request), true).unwrap();
++        fixture.request.prompt = "different work".into();
++        assert!(prior(&fixture.request, &fixture.hash()).is_err());
++        fixture.request.prompt = "selected public task".into();
++        fixture.request.authorization_sha256 = "b".repeat(64);
++        assert!(prior(&fixture.request, &fixture.hash()).is_err());
++    }
++
++    #[test]
++    fn a_delayed_durable_commit_cannot_cross_the_native_input_deadline() {
++        let mut fixture = Fixture::new();
++        let db = database(&fixture.request.ledger_path).unwrap();
++        drop(db);
++        let path = fixture.request.ledger_path.clone();
++        let (locked, acquired) = std::sync::mpsc::channel();
++        let holder = std::thread::spawn(move || {
++            let db = Connection::open(path).unwrap();
++            db.execute_batch("BEGIN EXCLUSIVE").unwrap();
++            locked.send(()).unwrap();
++            std::thread::sleep(Duration::from_millis(300));
++            db.execute_batch("COMMIT").unwrap();
++        });
++        acquired.recv().unwrap();
++        fixture.request.deadline_unix_ms = util::now_ms() + 100;
++        let hash = fixture.hash();
++        let commit = json!({"contract":CONTRACT, "dispatch_id":fixture.request.dispatch_id,
++            "request_sha256":hash, "authorize":true});
++        let mut input = io::Cursor::new(format!("{commit}\n"));
++        let mut result = receipt(&fixture.request);
++        let error = before_input(&fixture.request, &hash, &mut input, &mut result).unwrap_err();
++        assert_eq!(error.to_string(), "authorization_revoked");
++        holder.join().unwrap();
++        // The caller must propagate this error instead of writing a user frame or spawning queue.
++        // The conservative attempt marker still prevents a crash/restart from replaying the input.
++        assert_eq!(prior(&fixture.request, &hash).unwrap().unwrap()["state"], "delivery_unknown");
++    }
++
++    #[cfg(windows)]
++    #[tokio::test]
++    async fn impossible_windows_arguments_are_rejected_before_native_attempt_or_ready() {
++        let mut fixture = Fixture::new();
++        for (prompt, code) in
++            [("x".repeat(40000), "native_command_line_limit"), ("x\0y".into(), "invalid_native_argument")]
++        {
++            fixture.request.prompt = prompt;
++            let mut input = io::Cursor::new(Vec::<u8>::new());
++            let mut result = receipt(&fixture.request);
++            assert_eq!(deliver(&fixture.request, &mut input, &mut result).await.unwrap_err().to_string(), code);
++            assert_eq!(result["state"], "not_sent");
++            assert_eq!(result["native_input_attempted"], false);
++            assert!(prior(&fixture.request, &fixture.hash()).unwrap().is_none());
++        }
++    }
++}
+diff --git a/src/main.rs b/src/main.rs
+index 83128f684109cb8fc2e1ce7dae1f9c4d5306bf33..49927c2056c9fc741a94fd209a23a9874fe0f98a 100644
+--- a/src/main.rs
++++ b/src/main.rs
+@@ -1,4 +1,5 @@
+ mod agent;
++mod avalokita;
+ mod claude;
+ mod client;
+ mod codex;
+@@ -124,6 +125,9 @@ struct Cli {
+ 
+ #[derive(Subcommand)]
+ enum Cmd {
++    /// Avalokita's exact, one-attempt local delivery protocol on stdio. No daemon, setup, or fallback.
++    #[command(hide = true)]
++    AvalokitaDeliver,
+     /// Show who is working on what, across the team
+     Who {
+         /// Only sessions matching this text
+@@ -310,8 +314,11 @@ enum Cmd {
+ 
+ #[tokio::main]
+ async fn main() -> Result<()> {
+-    migrate::as_ours();
+     let cmd = Cli::parse().cmd;
++    if matches!(cmd, Some(Cmd::AvalokitaDeliver)) {
++        return avalokita::run().await;
++    }
++    migrate::as_ours();
+     paths::migrate();
+     match cmd {
+         Some(Cmd::Daemon { service }) => daemon::run(service).await,
+@@ -690,7 +697,7 @@ async fn cli(cmd: Cmd) -> Result<()> {
+                 println!("The daemon is not running.");
+             }
+         }
+-        Cmd::Daemon { .. } | Cmd::Mcp | Cmd::Hook { .. } | Cmd::Tray | Cmd::Endpoint => {
++        Cmd::Daemon { .. } | Cmd::Mcp | Cmd::Hook { .. } | Cmd::Tray | Cmd::Endpoint | Cmd::AvalokitaDeliver => {
+             unreachable!("handled in main")
+         }
+     }

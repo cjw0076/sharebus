@@ -1,46 +1,111 @@
-# ShareBus
+# Avalokita
 
-사용 중인 AI 대화들이 선택한 메시지와 자료를 주고받도록 연결하는 로컬 작업실입니다. 캐릭터를 누르고 할 일을 말하면, 누가 받았고 답했는지 같은 화면에서 볼 수 있습니다.
+Avalokita is a shared desktop workspace for existing native AI assistants.
+Each assistant keeps its own provider subscription, conversation and tools.
+Participants exchange selected messages, propose roles, coordinate edits and
+review each other's work under the user's goal. The main experience is a chat
+composer and a visible council room.
 
-**개발 알파 소스를 공개했습니다.** 현재는 개발자가 소스로 시험하는 버전입니다. 일반 사용자용 설치 파일과 자연어로 설치·복구를 돕는 전용 안내 대화는 아직 제공되지 않습니다.
+This is a **development candidate**, not a verified three-provider release.
+See `release-policy.json` for explicit build and release gates. No Avalokita
+provider API key or extra model API billing is required by the intended native
+integration. Native assistants still require the user's own supported account.
 
-## 사용할 때의 흐름
+## Repository
 
-소스의 연결 화면은 다음 흐름으로 구성돼 있습니다. 설치부터 앱 연결까지 처음 사용하는 사람의 전체 과정은 아직 검증 중입니다.
+- `outputs/avalokita/`: application source, Electron shell and procedural council.
+- `outputs/sharebus/`: local durable collaboration source.
+- `vendor/reason-network/`: verified Avalokita native-delivery fork and unchanged upstream licenses.
+- `patches/`: two exact LF patches from the upstream pin to the frozen local fork commit.
+- `packaging/`: runtime locks and platform package definitions.
+- `scripts/`: payload checks, runtime assembly, smoke and provenance.
 
-1. **ShareBus에서 작업 폴더를 고릅니다.** 폴더는 마우스로 선택합니다.
-2. **사용할 AI 앱을 고르고 ‘연결’을 누릅니다.** 이미 로그인한 앱의 구독을 사용합니다. 앱에서 연결 허용이나 다시 불러오기를 요청하면 안내에 따라 한 번 확인합니다.
-3. **열린 작업실에 할 일을 적습니다.** 캐릭터를 누르면 해당 참가자에게 보낼 수 있습니다. 연결된 사람과 답변을 기다리는 사람을 화면에서 확인합니다.
+The existing `outputs/` source paths are retained to preserve Python imports.
+The earlier standalone ShareBus CLI, wheel configuration and contributor notes
+remain in this repository. Current application checks use `.github/workflows/ci.yml`
+and `packages.yml`; the older wheel tools retain their original snapshot-specific
+pins and do not establish compatibility with this integrated candidate.
+Development recordings, native session IDs, private logs, credentials, extracted
+official mascot media and prior build directories are excluded from this tree.
 
-일반 화면에서 연결 번호나 비밀 키를 직접 입력하는 흐름은 사용하지 않습니다. 앱이 발견됐다는 표시와 실제 연결 완료는 구분합니다. 개발 환경과 실행 방법은 [CONTRIBUTING.md](CONTRIBUTING.md)에 있습니다.
+## Development
 
-## 무엇을 할 수 있나요?
+Use the exact toolchain versions frozen in `release-policy.json`; the present
+pins are candidates until compatibility and supported patch levels are reviewed.
 
-- 같은 컴퓨터의 작업실에서 참가자에게 메시지를 보내고 질문에 답합니다.
-- 직접 고른 자료만 공유하고, 대기 중인 일과 결과를 보관합니다.
-- 전체 작업이나 특정 참가자의 새 전달을 일시정지합니다. 기록은 남습니다.
-- 앱별 대화 연결을 시험할 수 있습니다. 실제로 확인된 범위는 아래와 같습니다.
+```text
+npm ci
+npm --prefix outputs/avalokita/app ci
+npm run test:packaging
+npm run build
+python scripts/verify_ui_payload.py
+```
 
-| 연결 경로 | 개발 기록에서 확인한 범위 | 추가 확인이 필요한 범위 |
+## Distribution targets
+
+| Target | Candidate formats | Validation status |
 | --- | --- | --- |
-| Codex | Windows 구독 CLI 대화에서 Claude와 작업·회신을 주고받고, 종료·재시작 뒤 같은 대화 재개와 무힌트 기억 시험을 통과 | 기존 Desktop 대화 연결과 고유 도구 보존 |
-| Claude | 같은 Windows 시험에서 작업·회신·최종 결과를 완료하고, 같은 대화 재개와 별도 무힌트 기억 시험을 통과 | 기존 업무 Desktop 대화 연결과 역할·고유 도구 보존 |
-| Antigravity | 연결 코드와 합성 시험 | 기존 앱 대화의 실제 전달·결과 회신 |
+| Windows x64 | Portable EXE, per-user NSIS installer | New bundled-runtime candidate not yet built |
+| macOS Apple Silicon | DMG, ZIP | Native build and original-session delivery unverified |
+| macOS Intel | DMG, ZIP | Native build and original-session delivery unverified |
+| Linux x64 / GNU libc | AppImage, tar.gz | Native build and original-session delivery unverified |
 
-이는 별도로 소유한 Windows 개발 시험 대화의 확인 범위입니다. 기억 시험은 이전 대화에 저장한 임의 값을 답이나 힌트 없이 물었고, 두 앱이 도구 조회 없이 정확히 답했습니다. 최초의 다른 시험은 질문에 답이 들어 있어 기억 증거에서 제외했습니다. 기존 업무 Desktop 대화, 세 앱 전체 연결, macOS·Linux 실행과 일반 사용자용 설치는 추가 확인 대상입니다. [지원 범위](docs/STATUS.md)에서 시험을 구분해 볼 수 있습니다.
+The installer bundles Python, its locked dependencies and a fixed Reason
+sidecar. End users must not install Python. Public CI uses native OS/CPU runners;
+it never logs into provider accounts or submits native prompts. Windows ARM,
+Linux ARM, Alpine/musl and auto-updates are outside the first package matrix.
 
-첫 [Windows·macOS·Linux 자동 검사](https://github.com/cjw0076/sharebus/actions/runs/40509040282)는 모두 실패했고, 수정 사항을 검토 중입니다. 공개 소스가 있다는 사실이 설치나 모든 운영체제 지원의 완료를 뜻하지 않습니다.
+## Build and release
 
-ShareBus 자체는 유료 모델 API 키를 요구하지 않는 구독 앱 연결을 목표로 합니다. 실제 연결은 해당 앱이 지원하고 검증된 네이티브 경로를 사용해야 합니다. 각 제공자의 로그인, 구독과 사용 한도는 그대로 적용됩니다. ShareBus가 구독을 합치거나 사용량을 무제한으로 만들지는 않습니다.
+1. Freeze runtime archive URLs and SHA256 values in
+   `packaging/python-runtime-lock.json`, including its retained license inventory.
+2. Generate and review per-platform dependency hash locks. For example, run
+   `pip-compile --generate-hashes` against `packaging/requirements-ci.in` on the
+   matching OS/CPU and store `packaging/requirements-<platform>.lock`.
+3. Integrate the bundled interpreter resolver into the packaged Electron path.
+   Source development may still use a development interpreter; a packaged app
+   must use its own runtime and must not silently discover a system Python.
+4. On a same-repository pull request targeting `main`, the platform workflow
+   validates the proposed candidate and runs all native package, attestation and
+   smoke steps without publishing. Tagged builds require
+   `release_guard.py --mode build`. See `CI-POLICY.md` for the trigger boundary.
+5. Independently verify relocated Python/SSL/SQLite/MCP/pywin32 imports, observed
+   signature status, the official per-app installation flow, GUI lifecycle and
+   the required actual native conversation exchanges. Package startup alone does
+   not prove peer delivery. Alpha may be unsigned after these checks; signed
+   stable additionally requires Windows publisher signing and macOS notarization.
+6. Freeze version, source revision and reviewed evidence. Only a matching `v*`
+   tag with completed release gates can reach the promotion job.
 
-## 내 정보는 어떻게 다루나요?
+Candidate version: `0.2.0-alpha.1`. It is a proposal, not a published release.
+Public packages carry SHA256 checksums, source/lock/tool provenance and GitHub
+artifact attestations. A source or installer hash is not a claim of bit-for-bit
+reproducibility or native delivery. Unsigned alpha must be labelled unsigned;
+checksums alone do not provide an operating-system publisher identity. Platform
+signature status remains unverified until a real package is inspected.
 
-작업실 기록과 비공개 연결 정보는 내 컴퓨터에 저장합니다. 선택한 메시지와 자료가 참여 AI 앱에 전달되면 해당 제공자의 처리 정책도 적용됩니다. ShareBus 안내 대화가 전체 대화 이력이나 비밀 키를 요구하는 흐름은 만들지 않습니다.
+The source export applies the two pinned patches exactly once, in order, and
+compares every vendored byte to local fork commit
+`cdc4da74ef522fcaa3cc59c090b401c1fd547762`. The chain starts at upstream
+`b3557ff454cd26a04c2a18804ba83ae5db8b119d`, applies the native integration
+patch for `837f9892432f8807209d12130dad564de5bcddb0`, then the queue patch for
+the final `cdc4da74` fork. Its original macOS icon and all seven literal Rust
+include inputs are part of the locked source payload.
+CI runs `scripts/verify_reason_source.py` before Cargo and builds that already
+patched tree. It never fetches a moving branch or reapplies a fuzzy patch.
+See `packaging/reason-source-lock.json` for the upstream/fork/patch pins and all
+source hashes. The fork commit is a local provenance identifier; it is not a
+claim that a separate fork repository has already been published.
 
-일시정지와 종료는 새 버스 전달을 멈춥니다. 이미 AI 앱에 접수된 입력은 해당 앱에서 처리 여부를 확인해야 합니다. 같은 OS 계정의 다른 프로그램까지 격리하는 보안 경계는 제공하지 않습니다. [보안 안내](SECURITY.md)
+For unsigned alpha, use only the operating system's ordinary per-app decision
+flow documented by [Apple](https://support.apple.com/guide/mac-help/open-a-mac-app-from-an-unknown-developer-mh40616/mac)
+or [Microsoft](https://learn.microsoft.com/en-us/windows/security/operating-system-security/virus-and-threat-protection/microsoft-defender-smartscreen/).
+Release notes must describe the actually tested installer behavior. The app does
+not require global protection changes or ship scripts to disable OS safeguards.
 
-## 개발에 참여하기
+## Licenses and contributions
 
-개발 환경과 명령은 [CONTRIBUTING.md](CONTRIBUTING.md), 전용 안내 대화의 연결 기준은 [GUIDE-SESSION.md](docs/GUIDE-SESSION.md), 공개 전 확인 항목은 [RELEASE-CHECKLIST.md](RELEASE-CHECKLIST.md)에 있습니다.
-
-새로 작성한 ShareBus 코드는 [MIT](LICENSE)를 적용합니다. 재사용한 부분은 각 원저작자의 고지와 라이선스를 함께 보존합니다. 제공자 이름은 연결 대상을 설명하기 위한 것으로, 공식 제휴를 뜻하지 않습니다.
+The proposed Avalokita source license is MIT; this choice is still subject to
+the release review. Upstream software keeps its own license. See `NOTICE` and
+the original retained license texts. Provider names identify compatibility;
+the procedural characters are Avalokita artwork, not official endorsements.

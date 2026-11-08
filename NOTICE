@@ -1,0 +1,36 @@
+Avalokita distribution notices
+
+Reason Network 0.12.11 source and a corresponding sidecar binary are derived from
+https://github.com/reason-machines/reason-network
+Upstream revision: b3557ff454cd26a04c2a18804ba83ae5db8b119d
+Copyright notices and the MIT OR Apache-2.0 license texts are retained under
+vendor/reason-network and beside the packaged Reason binary. Any Avalokita
+modifications must be listed by patch hash in release-policy.json.
+The Avalokita native-delivery fork is fixed at local commit
+cdc4da74ef522fcaa3cc59c090b401c1fd547762. The public source export applies
+patches/reason-network-native-837f989.patch followed by the source-only
+patches/reason-network-queue-cdc4da74.patch to the upstream Git blobs. Their
+SHA256 values and the exact exported build-source hashes are recorded in
+packaging/reason-source-lock.json. Workspace STATE and private proof material
+are excluded. The original upstream license files and NOTICE remain
+byte-for-byte unchanged.
+The pinned upstream source includes two already-public binary signing-test key
+fixtures under src/testdata. They are retained only for upstream test fidelity,
+are not operator credentials, and are excluded from the runtime package.
+
+Sharebus includes MIT adaptations from Happy Coder's session hook forwarder
+(b0fc933dd423ee562207d1788c65b4b9cc4960d1) and agmsg's bounded watcher pattern
+(e3a93251628127a2ea2c7e416bd7db86bf29f3ef). Their retained original MIT texts,
+copyrights and exact adaptation notes are under outputs/sharebus/third_party in
+the public source and sharebus/third_party in the application resources.
+
+The packaged Python interpreter retains its PSF and bundled-library notices.
+Python dependencies retain their individual dist-info licenses. Electron and
+Chromium retain their runtime license files. Pretendard Variable's SIL Open Font
+License is retained beside the font.
+
+Official provider mascot/media files extracted or copied during local research
+are not included in this public source export or the default package.
+
+This notice is a distribution inventory. Before a public release, reconcile all
+binary dependencies and retained notices against the actual release payload.
