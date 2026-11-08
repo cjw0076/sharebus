@@ -9,6 +9,7 @@ const Module = require('node:module');
 const { EventEmitter } = require('node:events');
 const { validateReady, hostMatches, isLoopbackAddress } = require('./runtime-contract.cjs');
 const rootPackage = require('../../../package.json');
+const packageConfig = require('../../../packaging/electron-builder.cjs');
 
 const workspace = path.resolve('C:/Avalokita Test Workspace');
 const identity = { nonce: 'instance-0123456789abcdef', pid: 31415, workspace };
@@ -62,17 +63,53 @@ test('desktop source keeps renderer privileges disabled and cleanup scoped to th
   assert.doesNotMatch(source, /console\.(?:log|info|debug).*token/i);
 });
 
-test('desktop package includes only runnable Avalokita assets and pinned Sharebus modules', () => {
-  const resources = rootPackage.build.extraResources;
-  assert.deepEqual(resources.map(item => item.to), ['avalokita', 'sharebus']);
-  assert.deepEqual(resources[0].filter, ['app/dist/**/*', 'server.py', 'bridge.py', 'hosted.py', 'device_discovery.py', 'inventory_vault.py', 'inventory_sources.py', 'preference_learning.py', 'judgment.py', 'inventory_runtime.py', 'harmony.py', 'native_dispatch.py', 'adapters/__init__.py', 'adapters/codex_app_tools.py', 'adapters/canonical_reason.py', 'adapters/reason_engine.py', 'HARMONY.md', 'THIRD_PARTY.md', 'avalokita.py', 'mcp_server.py']);
-  assert.ok(rootPackage.build.files.includes('outputs/avalokita/desktop/preload.cjs'));
-  assert.ok(rootPackage.build.files.includes('outputs/avalokita/desktop/workspace-registry.cjs'));
-  assert.deepEqual(resources[1].filter, ['store.py', 'discovery.py', 'policy.py', 'install.py', 'daemon.py', 'supervisor.py', 'hosted_runtime.py', 'adapters.py', 'mcp_server.py', 'native_bridge.py', 'codex_bridge.py', 'antigravity_bridge.py', 'sidecar_registry.py', 'sharebus.py', 'auto_enroll.py', 'auto_mode.py', 'auto_watch.py', 'hooks_bridge.py', 'templates/team.json', 'templates/SHAREBUS.md', 'commands/sharebus/SKILL.md', 'commands/sharebus/session_hook_forwarder.cjs', 'third_party/NOTICE.md', 'third_party/sources.json', 'third_party/happy/LICENSE', 'third_party/happy/session_hook_forwarder.cjs', 'third_party/agmsg/LICENSE', 'third_party/agmsg/watch-once.sh', 'web/index.html', 'web/assets/PretendardVariable.woff2', 'web/assets/Pretendard-LICENSE.txt', 'web/assets/favicon.svg', 'web/assets/characters/sharebus-original-artwork.json', 'web/assets/characters/sharebus-codex.svg', 'web/assets/characters/sharebus-claude.svg', 'web/assets/characters/sharebus-gemini.svg']);
-  assert.ok(!resources.some(item => item.filter?.some(pattern => /(^|\/)(?:node_modules|private|\.sharebus|credentials|logs|tests|workspace|evidence)(?:\/|$)/i.test(pattern))));
-  assert.equal(rootPackage.scripts.start, 'npm run build && electron .');
-  assert.match(rootPackage.scripts['package:desktop'], /electron-builder --win portable --x64/);
-  assert.match(rootPackage.scripts['package:desktop:dir'], /electron-builder --win --x64 --dir/);
+test('desktop package allowlists the application, runtime resources, and notices', () => {
+  assert.deepEqual(packageConfig.files, [
+    'outputs/avalokita/desktop/main.cjs',
+    'outputs/avalokita/desktop/runtime-contract.cjs',
+    'outputs/avalokita/desktop/workspace-registry.cjs',
+    'outputs/avalokita/desktop/packaged-runtime.cjs',
+    'outputs/avalokita/desktop/preload.cjs',
+    'packaging/packaged-runtime.cjs',
+    'package.json',
+  ]);
+  assert.deepEqual(packageConfig.extraResources, [
+    { from: 'build/runtime/python', to: 'python', filter: ['**/*'] },
+    { from: 'build/runtime/PYTHON-RUNTIME.json', to: 'PYTHON-RUNTIME.json' },
+    { from: 'packaging/acp-sdk-runtime.json', to: 'ACP-SDK-RUNTIME.json' },
+    { from: 'packaging/ACP-SDK-NOTICE.txt', to: 'ACP-SDK-NOTICE.txt' },
+    { from: 'packaging/agent-client-protocol.LICENSE', to: 'licenses/agent-client-protocol.LICENSE' },
+    { from: 'build/runtime/reason', to: 'reason', filter: [
+      'reason-network', 'reason-network.exe', 'LICENSE-MIT', 'LICENSE-APACHE',
+      'NOTICE', 'AVALOKITA-CHANGES.md', 'SOURCE-LOCK.json',
+    ] },
+    { from: 'outputs/avalokita', to: 'avalokita', filter: [
+      'app/dist/**/*', 'server.py', 'bridge.py', 'hosted.py', 'device_discovery.py',
+      'inventory_runtime.py', 'inventory_sources.py', 'inventory_vault.py', 'preference_learning.py',
+      'judgment.py', 'THIRD_PARTY.md', 'adapters/REA-LICENSE.txt', 'harmony.py', 'native_dispatch.py',
+      'avalokita.py', 'mcp_server.py', 'reason_sessions.py', 'adapters/__init__.py',
+      'adapters/canonical_reason.py', 'adapters/codex_app_tools.py', 'adapters/reason_engine.py', 'HARMONY.md',
+    ] },
+    { from: 'outputs/sharebus', to: 'sharebus', filter: [
+      '__init__.py', 'sharebus.py', 'store.py', 'discovery.py', 'policy.py', 'install.py', 'daemon.py',
+      'supervisor.py', 'hosted_runtime.py', 'adapters.py', 'mcp_server.py', 'native_bridge.py',
+      'codex_bridge.py', 'antigravity_bridge.py', 'antigravity_acp.py', 'sidecar_registry.py', 'launcher.py',
+      'auto_mode.py', 'auto_enroll.py', 'auto_watch.py', 'hooks_bridge.py', 'templates/team.json',
+      'templates/SHAREBUS.md', 'commands/sharebus/SKILL.md', 'commands/sharebus/native_context.md',
+      'commands/sharebus/session_hook_forwarder.cjs', 'third_party/NOTICE.md', 'third_party/happy/LICENSE',
+      'third_party/agmsg/LICENSE', 'third_party/sources.json', 'third_party/happy/session_hook_forwarder.cjs',
+      'third_party/agmsg/watch-once.sh', 'web/index.html', 'web/assets/PretendardVariable.woff2',
+      'web/assets/Pretendard-LICENSE.txt', 'web/assets/favicon.svg',
+      'web/assets/characters/sharebus-original-artwork.json', 'web/assets/characters/sharebus-codex.svg',
+      'web/assets/characters/sharebus-claude.svg', 'web/assets/characters/sharebus-gemini.svg',
+    ] },
+    { from: 'build/runtime/BUILD-INFO.json', to: 'BUILD-INFO.json' },
+    { from: 'NOTICE', to: 'NOTICE' },
+    { from: 'LICENSE', to: 'LICENSE' },
+  ]);
+  assert.equal(rootPackage.scripts.package, 'electron-builder --config packaging/electron-builder.cjs --publish never');
+  assert.deepEqual(packageConfig.win.target, ['portable', 'nsis']);
+  assert.equal(packageConfig.publish, null);
 });
 
 test('allowlisted desktop files load main and its local dependencies without starting Electron', t => {
@@ -87,8 +124,9 @@ test('allowlisted desktop files load main and its local dependencies without sta
     assert.ok(relative && !relative.startsWith('..') && !path.isAbsolute(relative));
     fs.rmSync(root, { recursive: true, force: true });
   });
-  for (const relative of rootPackage.build.files) {
-    assert.ok(!relative.includes('*'), 'desktop fixture copies only explicit package files');
+  for (const relative of packageConfig.files) {
+    assert.ok(!relative.includes('*') && !path.isAbsolute(relative) && !relative.split(/[\\/]/).includes('..'),
+      'desktop fixture copies only explicit paths within the package');
     const target = path.join(root, relative);
     fs.mkdirSync(path.dirname(target), { recursive: true });
     fs.copyFileSync(path.resolve(__dirname, '../../..', relative), target);

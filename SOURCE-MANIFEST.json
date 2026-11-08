@@ -295,10 +295,10 @@
     },
     {
       "path": "outputs/avalokita/desktop/desktop-smoke.test.cjs",
-      "sha256": "f7a3c547ab8c149a610ab9ad78bd8e37d2eee665014946102b24e9c08774e6de",
-      "bytes": 7744,
+      "sha256": "7a24004e33aa78c79c7864b6d9b361b5ec6dc2c4108b1cdee77589c4de569e55",
+      "bytes": 8818,
       "canonical_sha256": "f7a3c547ab8c149a610ab9ad78bd8e37d2eee665014946102b24e9c08774e6de",
-      "source_class": "canonical"
+      "source_class": "public-integration"
     },
     {
       "path": "outputs/avalokita/desktop/main.cjs",
